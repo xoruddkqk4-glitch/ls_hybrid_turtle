@@ -31,7 +31,11 @@ KST = pytz.timezone("Asia/Seoul")
 # source 허용 값 목록 (CLAUDE.md 계약)
 VALID_SOURCES = {"TURTLE_ENTRY", "TURTLE_PYRAMID", "TURTLE_EXIT", "MANUAL_SYNC"}
 
-# Google Sheets 열제목 (한글) — 순서 변경 시 _save_to_sheets의 row 리스트도 함께 수정
+# 체결 원장 시트 이름 (기본 sheet1 사용)
+# 포트폴리오 추이 시트 이름
+PORTFOLIO_SHEET_NAME = "포트폴리오 추이"
+
+# 체결 원장 열제목 (한글) — 순서 변경 시 _save_to_sheets의 row 리스트도 함께 수정
 SHEET_HEADERS = [
     "기록ID",           # record_id
     "기록시각(KST)",    # ts_kst
@@ -50,6 +54,14 @@ SHEET_HEADERS = [
     "매매구분",         # source (TURTLE_ENTRY / EXIT 등)
     "수익률(%)",        # profit_rate — SELL일 때만 입력, BUY는 빈칸
     "비고",             # note
+]
+
+# 포트폴리오 추이 시트 열제목
+PORTFOLIO_HEADERS = [
+    "기록시각(KST)",    # 기록 시각
+    "총평가금액(원)",   # 보유주식 + 예수금 합계
+    "주식평가액(원)",   # 보유 주식 평가금액만
+    "보유종목수",       # 현재 보유 중인 종목 수
 ]
 
 
@@ -134,11 +146,12 @@ def _save_to_sheets(record: dict):
                 spreadsheet.share(None, perm_type="anyone", role="reader")
             sheet = spreadsheet.sheet1
 
-        # 첫 행이 비어있으면 한글 열제목 추가 (새 시트 또는 기존 빈 시트 모두 처리)
+        # 첫 행이 "기록ID"로 시작하지 않으면 열제목을 1행에 삽입
+        # (기존 데이터가 있더라도 맨 위에 삽입하여 정렬을 맞춤)
         first_row = sheet.row_values(1)
-        if not first_row:
-            sheet.append_row(SHEET_HEADERS)
-            print(f"[원장] Google Sheets 열제목 추가 완료")
+        if not first_row or first_row[0] != "기록ID":
+            sheet.insert_row(SHEET_HEADERS, 1)
+            print("[원장] Google Sheets 열제목 추가 완료")
 
         # 수익률: SELL이고 profit_rate 필드가 있을 때만 표시, 그 외 빈칸
         profit_rate_val = record.get("profit_rate", "")
@@ -226,3 +239,65 @@ def append_trade(record: dict):
     price    = record.get("unit_price", 0)
     src      = record.get("source", "")
     print(f"[원장] 기록 완료 | {side_kor} {name}({stock_code}) {qty}주 @{price:,}원 [{src}]")
+
+
+def record_portfolio_snapshot(total_value: int, stock_value: int = 0, holdings_count: int = 0):
+    """포트폴리오 총평가금액 추이를 별도 시트('포트폴리오 추이')에 기록한다.
+
+    run_all.py 실행 시마다 한 번 호출해 시간에 따른 자산 변화를 추적한다.
+
+    Args:
+        total_value:    총평가금액 (보유주식 평가금액 + 예수금, 원 단위)
+        stock_value:    주식평가액만 따로 (원 단위, 선택)
+        holdings_count: 현재 보유 중인 종목 수
+    """
+    try:
+        import gspread
+        from oauth2client.service_account import ServiceAccountCredentials
+
+        json_path   = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "service_account.json")
+        sheet_title = os.getenv("GOOGLE_SPREADSHEET_TITLE", "LS Stock Trade History")
+
+        # 서비스 계정 파일 없으면 스킵 (오류 아님)
+        if not os.path.exists(json_path):
+            print(f"[원장] Google 서비스 계정 파일 없음 → 포트폴리오 추이 저장 스킵")
+            return
+
+        # Google API 인증
+        scope = [
+            "https://spreadsheets.google.com/feeds",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds  = ServiceAccountCredentials.from_json_keyfile_name(json_path, scope)
+        client = gspread.authorize(creds)
+
+        # 스프레드시트 열기 (없으면 체결 원장을 먼저 기록하라고 안내)
+        try:
+            spreadsheet = client.open(sheet_title)
+        except gspread.SpreadsheetNotFound:
+            print(f"[원장] 스프레드시트 '{sheet_title}' 없음 → 체결 원장을 먼저 기록하세요")
+            return
+
+        # "포트폴리오 추이" 시트 열기 (없으면 새로 생성)
+        try:
+            ws = spreadsheet.worksheet(PORTFOLIO_SHEET_NAME)
+        except gspread.WorksheetNotFound:
+            ws = spreadsheet.add_worksheet(title=PORTFOLIO_SHEET_NAME, rows=1000, cols=10)
+            print(f"[원장] '{PORTFOLIO_SHEET_NAME}' 시트 새로 생성")
+
+        # 첫 행이 열제목이 아니면 1행에 삽입
+        first_row = ws.row_values(1)
+        if not first_row or first_row[0] != "기록시각(KST)":
+            ws.insert_row(PORTFOLIO_HEADERS, 1)
+            print(f"[원장] 포트폴리오 추이 열제목 추가 완료")
+
+        # 현재 시각 + 자산 데이터 행 추가
+        ts_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+        ws.append_row([ts_kst, total_value, stock_value, holdings_count])
+        print(f"[원장] 포트폴리오 추이 기록 완료 "
+              f"— 총평가금액: {total_value:,}원, 보유종목: {holdings_count}개")
+
+    except ImportError:
+        print("[원장] gspread 미설치 → 포트폴리오 추이 저장 스킵")
+    except Exception as e:
+        print(f"[원장] 포트폴리오 추이 저장 오류 (무시하고 계속): {e}")

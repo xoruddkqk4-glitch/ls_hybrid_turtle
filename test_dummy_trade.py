@@ -12,6 +12,12 @@
 import trade_ledger
 import telegram_alert
 
+# 기존 더미 데이터가 있는 시트를 초기화하고 새로 시작하려면 아래 주석을 해제
+# (열제목이 이미 잘못된 위치에 있거나 데이터 순서가 어긋난 경우)
+# import gspread, os
+# from oauth2client.service_account import ServiceAccountCredentials
+# ... (수동 초기화)
+
 # ─────────────────────────────────────────
 # 더미 데이터 준비
 # ─────────────────────────────────────────
@@ -87,4 +93,18 @@ print()
 print("[테스트] 텔레그램 알림 발송 중...")
 telegram_alert.SendMessage(msg)
 print("[테스트] 완료!")
+print("=" * 50)
+
+# ─────────────────────────────────────────
+# 포트폴리오 추이 더미 기록
+# ─────────────────────────────────────────
+print()
+print("[테스트] 포트폴리오 추이 더미 기록 중...")
+# 가상의 총평가금액: 1억 + 매도 수익 포함
+total_value  = 100_000_000 + (230000 - 206000) * qty   # 100,240,000원
+stock_value  = 230000 * qty                              # 매도 후 현금 보유 중 → 0 가정
+holdings_cnt = 0  # 매도 후 보유 없음
+
+trade_ledger.record_portfolio_snapshot(total_value, stock_value, holdings_cnt)
+print("[테스트] 포트폴리오 추이 기록 완료!")
 print("=" * 50)

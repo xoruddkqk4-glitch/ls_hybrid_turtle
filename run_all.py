@@ -29,6 +29,7 @@ import ls_client
 import risk_guardian
 import target_manager
 import timer_agent
+import trade_ledger
 import turtle_order_logic
 from telegram_alert import SendMessage
 
@@ -143,6 +144,21 @@ def main():
         msg = f"⚠️ [run_all] 주문 실행 오류: {e}"
         print(msg)
         SendMessage(msg)
+
+    # ─────────────────────────────────────
+    # STEP 7: 포트폴리오 추이 기록
+    # ─────────────────────────────────────
+    print("\n[run_all] ▶ STEP 7: 포트폴리오 추이 기록")
+    try:
+        # 잔고 조회로 보유 종목 수와 주식 평가액 계산
+        balance     = ls_client.get_balance()
+        total_value = ls_client.get_total_capital()
+        stock_value = sum(int(item["qty"] * item["current_price"]) for item in balance)
+        holdings_cnt = len(balance)
+        trade_ledger.record_portfolio_snapshot(total_value, stock_value, holdings_cnt)
+    except Exception as e:
+        # 포트폴리오 추이 오류는 치명적이지 않음 — 로그만 남기고 계속
+        print(f"[run_all] 포트폴리오 추이 기록 오류 (계속 진행): {e}")
 
     # ─────────────────────────────────────
     # 완료
