@@ -27,6 +27,7 @@
 
 import json
 import os
+import time
 
 import ls_client
 import indicator_calc
@@ -129,9 +130,11 @@ def calc_unit_size(code: str, price: int, atr_n: float, total_capital: int):
         return None
 
     # 1 Unit = 총자본의 2%를 ATR 1회 변동에 위험에 노출시키는 수량
-    qty = int((total_capital * 0.02) / (atr_n * price))
+    # 공식: (총자본 × 0.02) / N(ATR 원화값)
+    # 검증: qty주 × ATR원 = 총자본 × 2% → qty = 총자본 × 0.02 / ATR
+    qty = int((total_capital * 0.02) / atr_n)
     if qty <= 0:
-        print(f"[turtle] {name}({code}) 계산된 수량=0 (ATR={atr_n:,.0f}, 가격={price:,}) → 스킵")
+        print(f"[turtle] {name}({code}) 계산된 수량=0 (ATR={atr_n:,.0f}) → 스킵")
         return None
 
     return (qty, "NORMAL", 4)
@@ -384,7 +387,7 @@ def run_orders(entry_signals: list):
     # ① 총 자본 조회 (Unit 수량 계산 기준)
     total_capital = ls_client.get_total_capital()
     if total_capital <= 0:
-        print("[turtle] 총자본 조회 실패 → 모든 주문 중단")
+        print("[turtle] 총자본이 0원 → 주문 중단 (모의투자 계좌에 가상 자금이 없거나 조회 실패)")
         return
 
     print(f"[turtle] 총 자본: {total_capital:,}원")
@@ -426,7 +429,8 @@ def run_orders(entry_signals: list):
             print(f"[turtle] {code} 현재가 조회 실패 → 진입 스킵")
             continue
 
-        # 지표 계산 (ATR 등)
+        # 지표 계산 (ATR 등) — API 속도 제한 방지
+        time.sleep(1.0)
         indicators = indicator_calc.get_all_indicators(code)
         atr_n      = indicators.get("atr", 0.0)
         if atr_n <= 0:
@@ -459,7 +463,8 @@ def run_orders(entry_signals: list):
             print(f"[turtle] {code} 현재가 조회 실패 → 피라미딩 스킵")
             continue
 
-        # 지표 계산
+        # 지표 계산 — API 속도 제한 방지
+        time.sleep(1.0)
         indicators = indicator_calc.get_all_indicators(code)
         atr_n      = indicators.get("atr", 0.0)
         if atr_n <= 0:

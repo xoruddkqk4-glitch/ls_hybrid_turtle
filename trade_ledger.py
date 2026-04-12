@@ -31,6 +31,27 @@ KST = pytz.timezone("Asia/Seoul")
 # source 허용 값 목록 (CLAUDE.md 계약)
 VALID_SOURCES = {"TURTLE_ENTRY", "TURTLE_PYRAMID", "TURTLE_EXIT", "MANUAL_SYNC"}
 
+# Google Sheets 열제목 (한글) — 순서 변경 시 _save_to_sheets의 row 리스트도 함께 수정
+SHEET_HEADERS = [
+    "기록ID",           # record_id
+    "기록시각(KST)",    # ts_kst
+    "계좌",             # account_id
+    "매수/매도",        # side
+    "종목코드",         # stock_code
+    "종목명",           # stock_name
+    "주문번호",         # order_no
+    "체결번호",         # exec_no
+    "수량(주)",         # qty
+    "단가(원)",         # unit_price
+    "거래금액(원)",     # gross_amount (qty × unit_price)
+    "수수료(원)",       # fee
+    "실수령금액(원)",   # net_amount
+    "주문유형",         # order_type (MARKET / LIMIT)
+    "매매구분",         # source (TURTLE_ENTRY / EXIT 등)
+    "수익률(%)",        # profit_rate — SELL일 때만 입력, BUY는 빈칸
+    "비고",             # note
+]
+
 
 # ─────────────────────────────────────────
 # 내부 함수
@@ -104,25 +125,29 @@ def _save_to_sheets(record: dict):
 
         # 스프레드시트 열기 (없으면 새로 생성)
         try:
-            sheet = client.open(sheet_title).sheet1
+            spreadsheet = client.open(sheet_title)
+            sheet = spreadsheet.sheet1
         except gspread.SpreadsheetNotFound:
             spreadsheet = client.create(sheet_title)
             if folder_id:
                 # 지정한 드라이브 폴더로 이동
-                client.insert_permission(
-                    spreadsheet.id, None, perm_type="anyone", role="reader"
-                )
+                spreadsheet.share(None, perm_type="anyone", role="reader")
             sheet = spreadsheet.sheet1
-            # 첫 행에 헤더 추가
-            headers = [
-                "record_id", "ts_kst", "account_id", "side",
-                "stock_code", "stock_name", "order_no", "exec_no",
-                "qty", "unit_price", "gross_amount", "fee", "net_amount",
-                "order_type", "source", "note",
-            ]
-            sheet.append_row(headers)
 
-        # 데이터 행 추가 (CLAUDE.md 체결 원장 스키마 순서)
+        # 첫 행이 비어있으면 한글 열제목 추가 (새 시트 또는 기존 빈 시트 모두 처리)
+        first_row = sheet.row_values(1)
+        if not first_row:
+            sheet.append_row(SHEET_HEADERS)
+            print(f"[원장] Google Sheets 열제목 추가 완료")
+
+        # 수익률: SELL이고 profit_rate 필드가 있을 때만 표시, 그 외 빈칸
+        profit_rate_val = record.get("profit_rate", "")
+        if profit_rate_val != "" and isinstance(profit_rate_val, (int, float)):
+            profit_rate_str = f"{profit_rate_val:+.2f}"  # 예: "+12.34" 또는 "-5.67"
+        else:
+            profit_rate_str = ""
+
+        # 데이터 행 추가 (SHEET_HEADERS 순서와 일치)
         row = [
             record.get("record_id",   ""),
             record.get("ts_kst",      ""),
@@ -139,9 +164,11 @@ def _save_to_sheets(record: dict):
             record.get("net_amount",   0),
             record.get("order_type",  ""),
             record.get("source",      ""),
+            profit_rate_str,
             record.get("note",        ""),
         ]
         sheet.append_row(row)
+        print(f"[원장] Google Sheets 저장 완료")
 
     except ImportError:
         print("[원장] gspread 미설치 → Sheets 저장 스킵 (pip install gspread oauth2client)")

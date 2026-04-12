@@ -23,6 +23,8 @@
 #   import risk_guardian
 #   risk_guardian.run_guardian()
 
+import time
+
 import ls_client
 import indicator_calc
 import trade_ledger
@@ -120,20 +122,21 @@ def check_trailing_stop(code: str, current_price: int, pos: dict, indicators: di
 # 청산 주문 실행
 # ─────────────────────────────────────────
 
-def place_exit_order(code: str, qty: int, reason: str):
+def place_exit_order(code: str, qty: int, reason: str, current_price: int = 0):
     """전량 매도 주문을 실행하고 포지션을 청산한다.
 
     실행 순서:
     1. lovely_stock_list 포함 여부 확인 (안전장치)
     2. 전량 매도 주문 실행
     3. position_state.json에서 해당 종목 삭제
-    4. 체결 원장(trade_ledger)에 기록
+    4. 체결 원장(trade_ledger)에 기록 (수익률 포함)
     5. 텔레그램으로 알림 발송
 
     Args:
-        code:   종목코드 6자리
-        qty:    매도 수량 (잔고 조회의 sellable_qty 사용)
-        reason: 청산 이유 (예: "2N 하드 손절", "10일 신저가 경신 익절")
+        code:          종목코드 6자리
+        qty:           매도 수량 (잔고 조회의 sellable_qty 사용)
+        reason:        청산 이유 (예: "2N 하드 손절", "10일 신저가 경신 익절")
+        current_price: 현재가 (수익률 계산용, 0이면 last_buy_price로 근사)
     """
     # ① 안전장치: lovely_stock_list에 없는 종목은 절대 주문하지 않음
     if code not in lovely_stock_list:
@@ -169,29 +172,41 @@ def place_exit_order(code: str, qty: int, reason: str):
     avg_buy_price  = removed_pos.get("avg_buy_price", 0)
     last_buy_price = removed_pos.get("last_buy_price", 0)
 
-    # 매도 source: 손절은 TURTLE_EXIT, 익절도 TURTLE_EXIT (구분은 note로)
+    # 매도가: current_price가 있으면 사용, 없으면 last_buy_price로 근사
+    sell_price = current_price if current_price > 0 else last_buy_price
+
+    # 수익률 계산: (매도가 - 평균매입가) / 평균매입가 × 100
+    if avg_buy_price > 0 and sell_price > 0:
+        profit_rate = round((sell_price - avg_buy_price) / avg_buy_price * 100, 2)
+    else:
+        profit_rate = 0.0
+
+    # 매도 source: TURTLE_EXIT (손절/익절 구분은 note 필드로)
     trade_ledger.append_trade({
         "side":        "SELL",
         "stock_code":  code,
         "stock_name":  name,
         "qty":         qty,
-        "unit_price":  last_buy_price,  # 시장가라 정확한 체결가는 모름, 최근 매수가로 근사
+        "unit_price":  sell_price,
         "order_no":    order_no,
         "order_type":  "MARKET",
         "source":      "TURTLE_EXIT",
+        "profit_rate": profit_rate,     # 수익률 (%) — Google Sheets에 기록됨
         "note":        reason,
     })
 
     # ⑤ 텔레그램 알림 (손절과 익절 이모지 구분)
     is_stop_loss = "손절" in reason
     emoji = "🔴" if is_stop_loss else "💰"
+    profit_sign  = "+" if profit_rate >= 0 else ""
 
     telegram_alert.SendMessage(
         f"{emoji} 포지션 청산\n"
         f"종목: {name}({code})\n"
         f"수량: {qty:,}주\n"
-        f"사유: {reason}\n"
-        f"평균 매입가: {avg_buy_price:,}원"
+        f"평균 매입가: {avg_buy_price:,}원 → 매도가: {sell_price:,}원\n"
+        f"수익률: {profit_sign}{profit_rate:.2f}%\n"
+        f"사유: {reason}"
     )
 
 
@@ -254,15 +269,16 @@ def run_guardian():
 
         # ④ 하드 손절 먼저 확인 (최우선)
         if check_hard_stop(code, current_price, pos):
-            place_exit_order(code, sellable_qty, "2N 하드 손절")
+            place_exit_order(code, sellable_qty, "2N 하드 손절", current_price)
             continue  # 이미 청산됐으므로 트레일링 스탑은 확인 불필요
 
-        # ⑤ 트레일링 스탑 확인 (지표 계산 필요)
+        # ⑤ 트레일링 스탑 확인 (지표 계산 필요) — API 속도 제한 방지
         try:
+            time.sleep(1.0)
             indicators   = indicator_calc.get_all_indicators(code)
             exit_reason  = check_trailing_stop(code, current_price, pos, indicators)
             if exit_reason:
-                place_exit_order(code, sellable_qty, exit_reason)
+                place_exit_order(code, sellable_qty, exit_reason, current_price)
         except Exception as e:
             print(f"[risk_guardian] {code} 지표 계산 오류: {e}")
 

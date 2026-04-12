@@ -10,6 +10,9 @@
 #   prices = ls_client.get_multi_price(["005930", "034020"])
 
 import os
+from datetime import datetime, timedelta
+
+import pytz
 from dotenv import load_dotenv
 from programgarden_finance.ls import LS
 from programgarden_finance.ls.korea_stock.market.t8407.blocks import T8407InBlock
@@ -23,6 +26,9 @@ load_dotenv()
 # 모듈 내부에서 사용하는 LS 인스턴스와 모의투자 여부 저장
 _ls = None
 _paper_trading = True  # 기본값: 모의투자
+
+# 한국 표준시 (KST, UTC+9)
+_KST = pytz.timezone("Asia/Seoul")
 
 
 # ─────────────────────────────────────────
@@ -185,11 +191,22 @@ def get_minute_chart(code: str, minute: int = 240, count: int = 25) -> list:
     _check_login()
 
     try:
+        # t8452는 sdate/edate 없이 호출하면 빈 결과를 반환하므로 명시적으로 지정
+        # edate = 오늘, sdate = 오늘로부터 (count × minute / 390 + 5) 영업일 전
+        # 390분(하루 장 시간) 기준으로 count개 캔들이 필요한 날수를 계산
+        today     = datetime.now(_KST)
+        days_back = max(int(count * minute / 390) + 10, 30)  # 여유있게 계산
+        sdate     = (today - timedelta(days=days_back)).strftime("%Y%m%d")
+        edate     = today.strftime("%Y%m%d")
+
         response = _ls.korea_stock().chart().t8452(
             T8452InBlock(
                 shcode=code,
                 ncnt=minute,    # 분 단위 (240 = 4시간봉)
                 qrycnt=count,
+                nday="0",       # 0: 날짜 범위 방식 사용
+                sdate=sdate,    # 시작일자 (YYYYMMDD)
+                edate=edate,    # 종료일자 (YYYYMMDD)
             )
         ).req()
 

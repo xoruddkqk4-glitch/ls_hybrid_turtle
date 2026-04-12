@@ -23,6 +23,7 @@
 
 import json
 import os
+import time
 from datetime import datetime
 
 import pytz
@@ -210,6 +211,8 @@ def run_update():
             continue
 
         # 지표 계산 (ATR, MA, 240분봉 20MA)
+        # LS API 호출 속도 제한 방지: 종목 간 1초 대기 (초당 1회 제한 준수)
+        time.sleep(1.0)
         indicators = indicator_calc.get_all_indicators(code)
 
         # 동적 목표가 계산
