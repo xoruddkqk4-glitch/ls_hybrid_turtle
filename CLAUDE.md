@@ -61,10 +61,19 @@
 | `timer_agent.py` | 30분 가드 타이머 (가짜 돌파 필터) |
 | `turtle_order_logic.py` | 리스크 기반 Unit 수량 계산, 피라미딩 주문, 예외 진입 처리 |
 | `risk_guardian.py` | 2N 하드 손절 및 트레일링 스탑 실시간 감시 |
+| `run_all.py` | 통합 배치 실행기 — 장 시간 체크 후 모든 모듈을 올바른 순서로 실행 |
+| `test_dummy_trade.py` | 더미 체결 기록 테스트 스크립트 (개발·검증 전용, 실계좌 무관) |
 | `.env` | API 키·계좌·텔레그램·Google 설정 (커밋 금지) |
-| `.env.example` | 환경변수 템플릿 |
+| `.env.example` | 환경변수 템플릿 (`.env` 작성 참고용) |
 | `requirements.txt` | 의존성 목록 (`programgarden-finance` 포함) |
-| `.gitignore` | 민감 파일 제외 규칙 |
+| `.gitignore` | 민감 파일·런타임 JSON 제외 규칙 |
+
+**런타임 중 자동 생성되는 JSON 파일 (커밋 금지):**
+| 파일 | 내용 |
+|------|------|
+| `unheld_stock_record.json` | 미보유 종목의 동적 목표가 및 30분 가드 타이머 상태 |
+| `position_state.json` | 보유 종목의 Unit 수·마지막 매수가·손절가·피라미딩 트리거가 |
+| `trade_ledger.json` | 체결 원장 전체 기록 |
 
 **서브에이전트 실행 순서 (구현 시):**  
 SA-FOUNDATION 완료 → SA-MODULE-ENTRY · SA-MODULE-TRADE 병렬
@@ -175,4 +184,4 @@ python run_all.py
 
 ---
 
-> 마지막 업데이트: 2026-04-13 (협업 규칙·기술 스택 추가)
+> 마지막 업데이트: 2026-04-13 (전체 구현 완료 — run_all.py·test_dummy_trade.py 추가, 런타임 JSON 파일 목록 추가)
