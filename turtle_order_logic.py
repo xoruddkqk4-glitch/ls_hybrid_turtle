@@ -7,7 +7,7 @@
 #   3. 가격이 일정 이상 오르면 추가로 산다 (피라미딩)
 #   4. 진입 신호가 온 종목과 기존 보유 종목의 피라미딩을 통합 처리한다
 #
-# position_state.json 구조:
+# held_stock_record.json 구조:
 # {
 #   "005930": {
 #     "current_unit":      2,          ← 현재 몇 번 샀는지 (최대 4회)
@@ -35,8 +35,8 @@ import trade_ledger
 import telegram_alert
 from config import lovely_stock_list
 
-# 포지션 상태 파일 경로
-POSITION_STATE_FILE = "position_state.json"
+# 보유 종목 상태 파일 경로 (미보유: unheld_stock_record.json 과 쌍)
+HELD_STOCK_RECORD_FILE = "held_stock_record.json"
 
 
 # ─────────────────────────────────────────
@@ -44,32 +44,32 @@ POSITION_STATE_FILE = "position_state.json"
 # ─────────────────────────────────────────
 
 def load_position_state() -> dict:
-    """position_state.json을 읽어서 반환한다.
+    """held_stock_record.json을 읽어서 반환한다.
 
     파일이 없거나 손상된 경우 빈 딕셔너리를 반환한다.
 
     Returns:
         종목코드 → 포지션 상태 딕셔너리
     """
-    if os.path.exists(POSITION_STATE_FILE):
+    if os.path.exists(HELD_STOCK_RECORD_FILE):
         try:
-            with open(POSITION_STATE_FILE, "r", encoding="utf-8") as f:
+            with open(HELD_STOCK_RECORD_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, dict):
                 return data
         except (json.JSONDecodeError, IOError):
-            print(f"[turtle] {POSITION_STATE_FILE} 읽기 오류 → 빈 상태로 시작")
+            print(f"[turtle] {HELD_STOCK_RECORD_FILE} 읽기 오류 → 빈 상태로 시작")
     return {}
 
 
 def save_position_state(state: dict):
-    """포지션 상태를 position_state.json에 저장한다.
+    """포지션 상태를 held_stock_record.json에 저장한다.
 
     Args:
         state: 종목코드 → 포지션 상태 딕셔너리
     """
     try:
-        with open(POSITION_STATE_FILE, "w", encoding="utf-8") as f:
+        with open(HELD_STOCK_RECORD_FILE, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
     except IOError as e:
         print(f"[turtle] 포지션 상태 저장 오류: {e}")
@@ -193,7 +193,7 @@ def place_entry_order(
     실행 순서:
     1. lovely_stock_list 포함 여부 확인 (안전장치)
     2. 매수 주문 실행
-    3. position_state.json에 포지션 상태 저장
+    3. held_stock_record.json에 포지션 상태 저장
     4. 체결 원장(trade_ledger)에 기록
     5. 텔레그램으로 알림 발송
 
@@ -294,7 +294,7 @@ def place_pyramid_order(code: str, qty: int, price: int, atr_n: float):
     # ② 기존 포지션 상태 확인
     position_state = load_position_state()
     if code not in position_state:
-        print(f"[turtle] {code} position_state 없음 → 피라미딩 불가")
+        print(f"[turtle] {code} held_stock_record.json에 기록 없음 → 피라미딩 불가")
         return
 
     pos         = position_state[code]

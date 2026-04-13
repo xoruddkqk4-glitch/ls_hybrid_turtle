@@ -4,7 +4,7 @@ service_account.json
 
 # 런타임 생성 파일 (프로그램 실행 중 자동 생성)
 unheld_stock_record.json
-position_state.json
+held_stock_record.json
 trade_ledger.json
 
 # 파이썬 자동 생성 파일

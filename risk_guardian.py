@@ -128,7 +128,7 @@ def place_exit_order(code: str, qty: int, reason: str, current_price: int = 0):
     실행 순서:
     1. lovely_stock_list 포함 여부 확인 (안전장치)
     2. 전량 매도 주문 실행
-    3. position_state.json에서 해당 종목 삭제
+    3. held_stock_record.json에서 해당 종목 삭제
     4. 체결 원장(trade_ledger)에 기록 (수익률 포함)
     5. 텔레그램으로 알림 발송
 
@@ -163,7 +163,7 @@ def place_exit_order(code: str, qty: int, reason: str, current_price: int = 0):
 
     order_no = result["order_no"]
 
-    # ③ position_state에서 해당 종목 삭제 (포지션 청산 완료)
+    # ③ held_stock_record.json 내용에서 해당 종목 삭제 (포지션 청산 완료)
     position_state = load_position_state()
     removed_pos    = position_state.pop(code, {})
     save_position_state(position_state)
@@ -219,7 +219,7 @@ def run_guardian():
 
     실행 순서:
     1. 잔고 조회로 현재 보유 종목 파악
-    2. position_state.json으로 손절/익절 기준가 파악
+    2. held_stock_record.json으로 손절/익절 기준가 파악
     3. 각 종목마다 순서대로 확인:
        ① 하드 손절 조건 (최우선)
        ② 트레일링 스탑 조건 (차순위)
@@ -240,7 +240,7 @@ def run_guardian():
         print("[risk_guardian] 보유 종목 없음")
         return
 
-    # ② position_state 조회 (손절가·평균단가 등 기준값)
+    # ② held_stock_record 조회 (손절가·평균단가 등 기준값)
     position_state = load_position_state()
 
     # ③ 각 보유 종목 순회
@@ -254,10 +254,10 @@ def run_guardian():
             print(f"[risk_guardian] {code} lovely_stock_list 외 종목 → 감시 스킵")
             continue
 
-        # position_state에 기준값이 없으면 감시 불가
+        # held_stock_record에 기준값이 없으면 감시 불가
         if code not in position_state:
             name = lovely_stock_list.get(code, {}).get("name", code)
-            print(f"[risk_guardian] {name}({code}) position_state 없음 "
+            print(f"[risk_guardian] {name}({code}) held_stock_record.json에 기록 없음 "
                   f"→ 수동 보유 종목으로 판단, 자동 청산 스킵")
             continue
 

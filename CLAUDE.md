@@ -72,7 +72,7 @@
 | 파일 | 내용 |
 |------|------|
 | `unheld_stock_record.json` | 미보유 종목의 동적 목표가 및 30분 가드 타이머 상태 |
-| `position_state.json` | 보유 종목의 Unit 수·마지막 매수가·손절가·피라미딩 트리거가 |
+| `held_stock_record.json` | 보유 종목의 Unit 수·마지막 매수가·손절가·피라미딩 트리거가 |
 | `trade_ledger.json` | 체결 원장 전체 기록 |
 
 **서브에이전트 실행 순서 (구현 시):**  
