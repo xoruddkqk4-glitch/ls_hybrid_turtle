@@ -35,6 +35,9 @@ VALID_SOURCES = {"TURTLE_ENTRY", "TURTLE_PYRAMID", "TURTLE_EXIT", "MANUAL_SYNC"}
 # 포트폴리오 추이 시트 이름
 PORTFOLIO_SHEET_NAME = "포트폴리오 추이"
 
+# 하루 1회 스냅샷 여부를 기록하는 로컬 파일 (커밋 제외 대상)
+DAILY_SNAPSHOT_FILE = "daily_snapshot.json"
+
 # 체결 원장 열제목 (한글) — 순서 변경 시 _save_to_sheets의 row 리스트도 함께 수정
 SHEET_HEADERS = [
     "기록ID",           # record_id
@@ -62,6 +65,7 @@ PORTFOLIO_HEADERS = [
     "총평가금액(원)",   # 보유주식 + 예수금 합계
     "주식평가액(원)",   # 보유 주식 평가금액만
     "보유종목수",       # 현재 보유 중인 종목 수
+    "누적수익률(%)",    # (총평가금액 - 초기자본) / 초기자본 × 100
 ]
 
 
@@ -241,16 +245,67 @@ def append_trade(record: dict):
     print(f"[원장] 기록 완료 | {side_kor} {name}({stock_code}) {qty}주 @{price:,}원 [{src}]")
 
 
-def record_portfolio_snapshot(total_value: int, stock_value: int = 0, holdings_count: int = 0):
-    """포트폴리오 총평가금액 추이를 별도 시트('포트폴리오 추이')에 기록한다.
+def _load_daily_snapshot() -> dict:
+    """daily_snapshot.json을 읽어 반환한다.
 
-    run_all.py 실행 시마다 한 번 호출해 시간에 따른 자산 변화를 추적한다.
+    파일이 없으면 빈 딕셔너리를 반환한다.
+    구조 예시: {"last_recorded_date": "2026-04-13"}
+    """
+    if os.path.exists(DAILY_SNAPSHOT_FILE):
+        try:
+            with open(DAILY_SNAPSHOT_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, IOError):
+            pass
+    return {}
+
+
+def _save_daily_snapshot(data: dict):
+    """daily_snapshot.json에 오늘 날짜를 기록한다."""
+    try:
+        with open(DAILY_SNAPSHOT_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except IOError as e:
+        print(f"[원장] daily_snapshot.json 저장 오류: {e}")
+
+
+def record_portfolio_snapshot(
+    total_value: int,
+    stock_value: int = 0,
+    holdings_count: int = 0,
+    initial_capital: int = 0,
+):
+    """포트폴리오 총평가금액·수익률 추이를 별도 시트('포트폴리오 추이')에 기록한다.
+
+    **하루에 한 번만 실행된다.** 같은 날 두 번 이상 호출해도 첫 번째만 기록되고
+    이후 호출은 조용히 건너뛴다. (daily_snapshot.json으로 중복 방지)
+
+    run_all.py는 장 마감 직전(15:20 이후)에 이 함수를 호출하도록 설정되어 있다.
 
     Args:
-        total_value:    총평가금액 (보유주식 평가금액 + 예수금, 원 단위)
-        stock_value:    주식평가액만 따로 (원 단위, 선택)
-        holdings_count: 현재 보유 중인 종목 수
+        total_value:     총평가금액 (보유주식 평가금액 + 예수금, 원 단위)
+        stock_value:     주식평가액만 따로 (원 단위, 선택)
+        holdings_count:  현재 보유 중인 종목 수
+        initial_capital: 누적수익률 계산용 초기 자본 (.env의 INITIAL_CAPITAL, 원 단위)
+                         0이면 수익률 칸을 빈칸으로 남긴다.
     """
+    # ① 오늘 이미 기록했는지 확인 (하루 1회 가드)
+    today_str     = datetime.now(KST).strftime("%Y-%m-%d")
+    snapshot_data = _load_daily_snapshot()
+    if snapshot_data.get("last_recorded_date") == today_str:
+        print(f"[원장] 오늘({today_str}) 포트폴리오 추이 이미 기록됨 → 스킵")
+        return
+
+    # ② 누적수익률 계산
+    #    초기자본(initial_capital)이 0이면 수익률을 계산할 수 없어 빈칸 처리
+    if initial_capital > 0:
+        profit_pct     = (total_value - initial_capital) / initial_capital * 100
+        profit_pct_str = f"{profit_pct:+.2f}"   # 예: "+12.34" 또는 "-5.67"
+    else:
+        profit_pct_str = ""
+
     try:
         import gspread
         from oauth2client.service_account import ServiceAccountCredentials
@@ -286,16 +341,24 @@ def record_portfolio_snapshot(total_value: int, stock_value: int = 0, holdings_c
             print(f"[원장] '{PORTFOLIO_SHEET_NAME}' 시트 새로 생성")
 
         # 첫 행이 열제목이 아니면 1행에 삽입
+        # (열 수가 늘어난 경우 기존 열제목이 있어도 다시 삽입하지 않음 — 수동 수정 권장)
         first_row = ws.row_values(1)
         if not first_row or first_row[0] != "기록시각(KST)":
             ws.insert_row(PORTFOLIO_HEADERS, 1)
             print(f"[원장] 포트폴리오 추이 열제목 추가 완료")
 
-        # 현재 시각 + 자산 데이터 행 추가
+        # ③ Google Sheets에 오늘 자산 현황 기록
         ts_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
-        ws.append_row([ts_kst, total_value, stock_value, holdings_count])
-        print(f"[원장] 포트폴리오 추이 기록 완료 "
-              f"— 총평가금액: {total_value:,}원, 보유종목: {holdings_count}개")
+        ws.append_row([ts_kst, total_value, stock_value, holdings_count, profit_pct_str])
+
+        # ④ 기록 성공 → daily_snapshot.json에 오늘 날짜 저장 (중복 방지)
+        _save_daily_snapshot({"last_recorded_date": today_str})
+
+        profit_msg = f", 누적수익률: {profit_pct_str}%" if profit_pct_str else ""
+        print(
+            f"[원장] 포트폴리오 추이 기록 완료 "
+            f"— 총평가금액: {total_value:,}원, 보유종목: {holdings_count}개{profit_msg}"
+        )
 
     except ImportError:
         print("[원장] gspread 미설치 → 포트폴리오 추이 저장 스킵")
