@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip show:*)",
+      "Bash(git init:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(python:*)",
+      "Bash(python3:*)",
+      "Bash(git rm:*)",
+      "Bash(wc -l /mnt/c/Users/user/Desktop/program_garden/ls_hybrid_turtle/*.py)"
+    ]
+  }
+}

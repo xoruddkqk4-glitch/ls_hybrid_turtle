@@ -34,12 +34,14 @@
 
 ```
 (run_all.py 또는 각 모듈 개별 실행)
+├── [SA-SCREENER]
+│   └── stock_screener.py    — 동적 감시 종목 선정 (08:40 / 09:05 배치)
 ├── [SA-FOUNDATION]
 │   ├── ls_client.py         — LS OpenAPI 래퍼 (URL 하드코딩 금지)
 │   ├── indicator_calc.py    — ATR(N), 이동평균선(20MA, 5MA), 10일 신저가
 │   ├── trade_ledger.py      — append_trade(record) 단일 진입점 + Google Sheets
 │   ├── telegram_alert.py    — SendMessage(msg) 단일 진입점
-│   └── config.py            — lovely_stock_list 상수 정의
+│   └── config.py            — get_watchlist() (dynamic_watchlist.json 경유)
 ├── [SA-MODULE-ENTRY]
 │   ├── target_manager.py    — 동적 목표가 산출, unheld_stock_record.json 관리
 │   └── timer_agent.py       — 30분 안착 검증 타이머
@@ -52,15 +54,20 @@
 
 | 파일 | 역할 |
 |------|------|
+| `stock_screener.py` | 동적 감시 종목 선정 — t1463·t1442 API로 매일 50개 자동 선정 |
 | `ls_client.py` | LS OpenAPI 래퍼 (토큰 관리, 시세·주문·잔고) |
 | `indicator_calc.py` | ATR(N), 20MA, 5MA, 10일 신저가 지표 계산 |
-| `trade_ledger.py` | 체결 원장 기록 + Google Sheets 동기화 |
+| `trade_ledger.py` | 체결 원장 기록 + Google Sheets 동기화 — 매도 체결 시 '포트폴리오 추이'·'손익차트' 시트 자동 갱신 |
 | `telegram_alert.py` | 텔레그램 알림 단일 모듈 |
-| `config.py` | `lovely_stock_list` 상수 (종목코드·시장) |
+| `config.py` | `get_watchlist()` — `dynamic_watchlist.json`을 읽어 감시 종목 반환 |
 | `target_manager.py` | 동적 목표가(`pending_target`) 산출 및 미보유 종목 상태 관리 |
 | `timer_agent.py` | 30분 가드 타이머 (가짜 돌파 필터) |
 | `turtle_order_logic.py` | 리스크 기반 Unit 수량 계산, 피라미딩 주문, 예외 진입 처리 |
 | `risk_guardian.py` | 2N 하드 손절 및 트레일링 스탑 실시간 감시 |
+| `balance_sync.py` | 실행 시작 시 실제 잔고 ↔ held_stock_record.json 동기화 — 수동 매수 종목 발견 시 1회 알림 후 자동 편입 (매도 전략만 감시) |
+| `chart_updater.py` | 구글 시트 "포트폴리오 추이" 데이터로 "손익차트" 탭에 콤보 차트(일일 막대 + 누적 선) 자동 생성 |
+| `sector_cache.py` | 종목별 테마 캐시 관리 (t1532 API, sector_cache.json) |
+| `daily_chart_cache.py` | 일봉·240분봉 캐시 관리 — 09:05 1회 빌드 후 당일 재사용 (240분봉은 30분 TTL) |
 | `run_all.py` | 통합 배치 실행기 — 장 시간 체크 후 모든 모듈을 올바른 순서로 실행 |
 | `test_dummy_trade.py` | 더미 체결 기록 테스트 스크립트 (개발·검증 전용, 실계좌 무관) |
 | `.env` | API 키·계좌·텔레그램·Google 설정 (커밋 금지) |
@@ -71,31 +78,43 @@
 **런타임 중 자동 생성되는 JSON 파일 (커밋 금지):**
 | 파일 | 내용 |
 |------|------|
+| `stock_candidates.json` | 08:40 배치 후보 종목 (스코어·지표 포함) |
+| `dynamic_watchlist.json` | 09:05 배치 최종 감시 종목 50개 — 모든 모듈이 이 파일을 참조 |
+| `watchlist_config.json` | 수동 화이트리스트/블랙리스트 (없으면 자동 선정만 사용) |
 | `unheld_stock_record.json` | 미보유 종목의 동적 목표가 및 30분 가드 타이머 상태 |
 | `held_stock_record.json` | 보유 종목의 Unit 수·마지막 매수가·손절가·피라미딩 트리거가 |
 | `trade_ledger.json` | 체결 원장 전체 기록 |
+| `sector_cache.json` | 종목별 테마 캐시 (t1532 API 결과) |
+| `daily_chart_cache.json` | 일봉(60개)·240분봉(25개) 캐시 — 09:05 market_open 직후 생성 |
 
 **서브에이전트 실행 순서 (구현 시):**  
-SA-FOUNDATION 완료 → SA-MODULE-ENTRY · SA-MODULE-TRADE 병렬
+SA-SCREENER 완료 → SA-FOUNDATION 완료 → SA-MODULE-ENTRY · SA-MODULE-TRADE 병렬
 
 ---
 
-## 관심 종목 리스트 (`lovely_stock_list`)
+## 감시 종목 선정 방식
 
-진입·감시·주문 대상은 **`lovely_stock_list`에 포함된 종목만**으로 한정한다.  
+진입·감시·주문 대상은 **`dynamic_watchlist.json`에 저장된 종목만**으로 한정한다.  
 리스트 밖 종목은 주문·상태 변경을 하지 않는다.
 
-| 종목명 | 종목코드 | 시장 |
-|--------|---------|------|
-| 삼성전자 | 005930 | KOSPI |
-| 두산에너빌리티 | 034020 | KOSPI |
-| 현대로템 | 064350 | KOSPI |
-| 케이뱅크 | 279570 | KOSPI |
-| 하이브 | 352820 | KOSDAQ |
-| LG에너지솔루션 | 373220 | KOSPI |
-| 두산로보틱스 | 454910 | KOSDAQ |
+**자동 선정 (매일 2회 배치):**
+- **08:40 배치**: t1463(거래대금 상위 200개) + t1442(52주 신고가 돌파) → 가격·시총·변동성 필터 → 스코어 계산 → `stock_candidates.json` 저장
+- **09:05 배치**: 당일 거래대금으로 재정렬 → 최종 50개 확정 → `dynamic_watchlist.json` 저장
 
-> 구현·실행 전 **종목코드·상장 여부**를 반드시 재확인한다 (상장 폐지·코드 변경 가능).
+**수동 조정 (`watchlist_config.json`):**
+```json
+{
+  "whitelist": ["005930", "034020"],
+  "blacklist": ["000000"]
+}
+```
+- `whitelist`: 자동 선정 결과와 무관하게 강제 포함 (score=1.0)
+- `blacklist`: 자동 선정됐더라도 강제 제외
+- 파일이 없으면 자동 선정 결과만 사용
+
+**자동 제외 조건 (API 비트마스크 + 코드 후처리):**
+- ETF·ETN·관리종목·투자경고·투자위험·우선주 → API 파라미터로 제거
+- 리츠(REITs)·인프라펀드 → 종목명 키워드 후처리로 제거
 
 ---
 
@@ -147,9 +166,11 @@ SA-FOUNDATION 완료 → SA-MODULE-ENTRY · SA-MODULE-TRADE 병렬
 | `unit_price` | number | 원 |
 | `gross_amount` | number | 단가×수량 (세전·수수료 전) |
 | `fee` | number | (선택) |
-| `net_amount` | number | (선택) 현금 증감 |
+| `net_amount` | number | SELL 시 실수령금액 (수수료 미반영 근사값 = gross_amount) |
 | `order_type` | string | `MARKET` / `LIMIT` |
 | `source` | string | 위 4가지 중 하나 |
+| `profit_rate` | number | (SELL 전용) 수익률 (%) — (매도가-평균매입가)/평균매입가×100 |
+| `profit_amount` | number | (SELL 전용) 수익금 (원) — (매도가-평균매입가)×수량 |
 | `note` | string | (선택) Unit 차수·손절/익절 구분 |
 
 `trade_ledger` 스키마 변경 시 이 표와 전략 명세서를 함께 수정한다.
@@ -161,7 +182,7 @@ SA-FOUNDATION 완료 → SA-MODULE-ENTRY · SA-MODULE-TRADE 병렬
 - 전략 파일에 시세/주문 URL 직접 기록
 - `record_id` 없이 원장 무한 증식
 - 비밀·전체 계좌번호를 로그·텔레그램·커밋에 노출
-- `lovely_stock_list` 외 종목에 주문·상태 변경 수행
+- `dynamic_watchlist.json` 외 종목에 주문·상태 변경 수행
 - Foundation 변경과 대량 전략 변경을 한 PR에 혼재
 
 ---
@@ -170,12 +191,14 @@ SA-FOUNDATION 완료 → SA-MODULE-ENTRY · SA-MODULE-TRADE 병렬
 
 ```bash
 cd ls_hybrid_turtle
-python target_manager.py     # 동적 목표가 갱신
-python timer_agent.py        # 30분 가드 체크
-python turtle_order_logic.py # 진입·피라미딩 주문
-python risk_guardian.py      # 손절·익절 감시
+python stock_screener.py premarket    # 08:40 — 후보 선별 (stock_candidates.json)
+python stock_screener.py market_open  # 09:05 — 최종 50개 확정 (dynamic_watchlist.json)
+python target_manager.py              # 동적 목표가 갱신
+python timer_agent.py                 # 30분 가드 체크
+python turtle_order_logic.py          # 진입·피라미딩 주문
+python risk_guardian.py               # 손절·익절 감시
 # 또는
-python run_all.py
+python run_all.py                     # 모든 단계 자동 실행 (스크리너 포함)
 ```
 
 ---
@@ -184,4 +207,4 @@ python run_all.py
 
 ---
 
-> 마지막 업데이트: 2026-04-13 (전체 구현 완료 — run_all.py·test_dummy_trade.py 추가, 런타임 JSON 파일 목록 추가)
+> 마지막 업데이트: 2026-04-23 (체결기록 연동 시트 자동 갱신 — 매도 체결 시 trade_ledger.py에서 '포트폴리오 추이'·'손익차트' 시트 자동 갱신)

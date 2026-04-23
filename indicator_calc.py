@@ -7,8 +7,10 @@
 #   - 10일 신저가: 트레일링 스탑 판단에 사용
 #   - 240분봉 20MA: 동적 목표가(pending_target) 계산에 사용
 #
-# 주의: 이 모듈은 ls_client를 통해서만 API 데이터를 가져온다.
+# 주의: 이 모듈은 daily_chart_cache(캐시 우선)를 통해 데이터를 가져오며,
+#       캐시 미존재·만료 시에는 ls_client를 통해 API를 직접 조회한다.
 
+import daily_chart_cache
 import ls_client
 
 
@@ -96,6 +98,88 @@ def calc_10day_low(ohlcv_list: list) -> int:
     return min(item["close"] for item in recent_10)
 
 
+def calc_n_day_high(ohlcv_list: list, n: int) -> float:
+    """최근 N일 장중 고가(high) 중 최고값을 계산한다.
+
+    오리지널 터틀 트레이딩 진입 신호 판단에 사용한다.
+      - 시스템1: n=20 (최근 20일 고가 최고값)
+      - 시스템2: n=55 (최근 55일 고가 최고값)
+
+    오늘 캔들은 제외하고 직전 N일만 본다.
+    현재 장중가(current_price)와 비교해 "오늘 처음 신고가를 돌파했는가"를 판단하기 위해서다.
+
+    Args:
+        ohlcv_list: 날짜 오름차순 정렬된 OHLCV 딕셔너리 리스트
+                    마지막 항목이 가장 최신(오늘 또는 직전 거래일)
+        n:          기간 일 수 (20 또는 55)
+
+    Returns:
+        직전 N일 장중 고가 최고값 (float). 데이터 부족 시 0.0.
+    """
+    # 직전 N일 = 마지막(오늘) 캔들을 제외한 앞의 N개
+    # 최소 (n + 1)개 필요: 직전 N일 + 오늘 1일
+    if len(ohlcv_list) < n + 1:
+        print(f"[indicator] {n}일 신고가 계산 데이터 부족: "
+              f"{len(ohlcv_list)}개 (필요: {n + 1}개 이상)")
+        return 0.0
+
+    # 오늘(마지막) 제외 → 직전 N개 캔들의 장중 고가 중 최고값
+    prev_n_candles = ohlcv_list[-(n + 1):-1]
+    return float(max(d["high"] for d in prev_n_candles))
+
+
+def get_screener_indicators(code: str) -> dict:
+    """스크리닝(종목 선정)에 필요한 지표만 계산한다. 일봉만 사용해서 빠르다.
+
+    get_all_indicators()와 달리 분봉(240분봉) 데이터를 조회하지 않으므로
+    수백 개 종목을 빠르게 처리할 때 적합하다.
+
+    Args:
+        code: 종목코드 6자리 (예: "005930")
+
+    Returns:
+        {
+            "atr":       1200.0,   # 20일 ATR — 변동성 필터(1.5%)에 사용
+            "atr_ratio":  0.016,   # ATR / 현재가 — 변동성 퍼센트
+            "ma5":       74500.0,  # 5일 이동평균 — 정배열 스코어에 사용
+            "ma20":      73000.0,  # 20일 이동평균 — 이격도 과열 컷에 사용
+            "high_52w":  80000,    # 52주 최고가 근사값 (일봉 25개 중 최고값)
+                                   #  ※ t1442 출신 종목은 prev_high가 더 정확하므로
+                                   #    stock_screener에서 덮어쓴다
+        }
+        오류 또는 데이터 부족 시: 모든 값이 0인 딕셔너리
+    """
+    default = {"atr": 0.0, "atr_ratio": 0.0, "ma5": 0.0, "ma20": 0.0, "high_52w": 0}
+
+    try:
+        # 일봉 25개만 조회 (20일 ATR + 여유 5개)
+        daily = ls_client.get_daily_chart(code, count=25)
+        if not daily:
+            return default
+
+        close_list = [d["close"] for d in daily]
+        current_price = close_list[-1]  # 가장 최근 종가
+
+        atr = calc_atr(daily, period=20)
+        if current_price <= 0:
+            return default
+
+        # 25개 일봉 중 고가(high)의 최댓값을 52주 최고가 근사값으로 사용
+        high_52w = max(d["high"] for d in daily)
+
+        return {
+            "atr":       atr,
+            "atr_ratio": atr / current_price,         # ATR 비율 (예: 0.016 = 1.6%)
+            "ma5":       calc_ma(close_list, period=5),
+            "ma20":      calc_ma(close_list, period=20),
+            "high_52w":  high_52w,
+        }
+
+    except Exception as e:
+        print(f"[indicator] {code} 스크리닝 지표 계산 오류: {e}")
+        return default
+
+
 def get_all_indicators(code: str) -> dict:
     """한 종목의 전략에 필요한 모든 지표를 한 번에 계산해서 반환한다.
 
@@ -118,16 +202,23 @@ def get_all_indicators(code: str) -> dict:
     default = {"atr": 0.0, "ma5": 0.0, "ma20": 0.0, "day10_low": 0, "ma240_20": 0.0}
 
     try:
-        # 일봉 데이터 조회 (25개: 20일 ATR + 여유 5일)
-        daily = ls_client.get_daily_chart(code, count=25)
+        # 일봉: 캐시 우선 — 오늘 날짜 캐시 없으면 API 직접 조회(폴백)
+        daily = daily_chart_cache.get_daily_cached(code, count=60)
+        if not daily:
+            print(f"[indicator] {code} 일봉 캐시 없음 → API 직접 조회")
+            daily = ls_client.get_daily_chart(code, count=25)
         if not daily:
             print(f"[indicator] {code} 일봉 데이터 없음")
             return default
 
         close_list = [d["close"] for d in daily]
 
-        # 240분봉 데이터 조회 (25개: 20MA 계산 + 여유)
-        minute_data = ls_client.get_minute_chart(code, minute=240, count=25)
+        # 240분봉: 캐시 우선 — 30분 TTL 만료·없으면 API 재조회 후 캐시 갱신
+        minute_data = daily_chart_cache.get_minute240_cached(code)
+        if not minute_data:
+            minute_data = ls_client.get_minute_chart(code, minute=240, count=25)
+            if minute_data:
+                daily_chart_cache.update_minute240_cache(code, minute_data)
         minute_close = [m["close"] for m in minute_data] if minute_data else []
 
         return {

@@ -50,7 +50,7 @@ def main():
     print(f"[snapshot] 로그인 성공 ({mode_str} 모드) ✅")
 
     # ─────────────────────────────────────
-    # STEP 2: 잔고·총평가금액 조회 후 기록
+    # STEP 2: 포트폴리오 요약 조회 후 기록
     # ─────────────────────────────────────
     print("\n[snapshot] ▶ STEP 2: 포트폴리오 기록")
     try:
@@ -58,25 +58,28 @@ def main():
         # 설정하지 않았으면 0 → 수익률 칸 빈칸으로 남김
         initial_capital = int(os.getenv("INITIAL_CAPITAL", "0"))
 
-        # 잔고 조회 (보유 종목 목록)
-        balance = ls_client.get_balance()
+        # 포트폴리오 전체 요약 조회 (총자산·주식평가액·예수금·손익·종목목록 한 번에)
+        summary = ls_client.get_portfolio_summary()
+        if not summary:
+            print("[snapshot] 포트폴리오 조회 실패 → 종료")
+            sys.exit(1)
 
-        # 총평가금액 = 보유 주식 평가금액 + 예수금
-        total_value = ls_client.get_total_capital()
-
-        # 주식평가액만 따로 계산 (보유수량 × 현재가 합계)
-        stock_value = sum(int(item["qty"] * item["current_price"]) for item in balance)
-
-        # 현재 보유 종목 수
-        holdings_cnt = len(balance)
+        # 실현손익: LS API 값 대신 체결 원장(trade_ledger.json)의 오늘 profit_amount 합산값 사용
+        # → 체결 원장·포트폴리오 추이·손익차트 세 시트가 동일한 기준으로 통일됨
+        today_realized_pnl = trade_ledger.get_today_realized_pnl()
 
         # Google Sheets '포트폴리오 추이' 시트에 기록
         # (내부에서 하루 1회 가드 동작 — 같은 날 두 번 호출해도 첫 번째만 기록됨)
         trade_ledger.record_portfolio_snapshot(
-            total_value,
-            stock_value,
-            holdings_cnt,
-            initial_capital,
+            total_value=summary["total_capital"],
+            stock_value=summary["stock_value"],
+            cash=summary["cash"],
+            purchase_amount=summary["purchase_amount"],
+            unrealized_pnl=summary["unrealized_pnl"],
+            realized_pnl=today_realized_pnl,
+            holdings_count=summary["holdings_count"],
+            holdings_names=summary["holdings_names"],
+            initial_capital=initial_capital,
         )
 
     except Exception as e:

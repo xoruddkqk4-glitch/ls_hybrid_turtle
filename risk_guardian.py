@@ -24,13 +24,63 @@
 #   risk_guardian.run_guardian()
 
 import time
+from datetime import datetime
+
+import pytz
 
 import ls_client
 import indicator_calc
 import trade_ledger
 import telegram_alert
-from config import lovely_stock_list
+from config import get_watchlist
 from turtle_order_logic import load_position_state, save_position_state
+
+
+def _get_stock_name(code: str) -> str:
+    """종목명을 조회한다. watchlist → held_stock_record → 코드 순으로 찾는다.
+
+    당일 watchlist 날짜가 맞지 않아 get_watchlist()가 빈 딕셔너리를 반환해도
+    held_stock_record.json에 저장된 stock_name으로 이름을 찾는다.
+    """
+    name = get_watchlist().get(code, {}).get("name", "")
+    if name:
+        return name
+    # watchlist에 없으면 held_stock_record에서 조회 (날짜 불일치 등으로 watchlist가 비어있을 때)
+    held = load_position_state()
+    return held.get(code, {}).get("stock_name", code)
+
+
+# 한국 표준시 (KST, UTC+9)
+_KST = pytz.timezone("Asia/Seoul")
+
+
+# ─────────────────────────────────────────
+# 시간 필터 헬퍼
+# ─────────────────────────────────────────
+
+def _is_stop_blackout() -> bool:
+    """지금이 2N 손절 보류 시간대인지 확인한다.
+
+    장 시작 직후(09:00~09:30)와 장 마감 직전(15:00~15:30)은
+    일시적인 급락이 많아 손절을 보류한다.
+    이 시간대가 지나면 다음 run_all.py 실행 때 자동으로 재확인한다.
+
+    Returns:
+        True:  보류 시간대 → 이번 회차 손절 스킵
+        False: 정상 감시 시간 → 기존대로 즉시 손절
+    """
+    now   = datetime.now(_KST)
+    hhmm  = now.hour * 100 + now.minute  # 예: 09:15 → 915, 15:20 → 1520
+
+    # 09:00~09:30: 장 시작 직후 변동성 구간
+    if 900 <= hhmm < 930:
+        return True
+
+    # 15:00~15:30: 장 마감 직전 변동성 구간
+    if 1500 <= hhmm < 1530:
+        return True
+
+    return False
 
 
 # ─────────────────────────────────────────
@@ -60,7 +110,26 @@ def check_hard_stop(code: str, current_price: int, pos: dict) -> bool:
         return False
 
     if current_price <= stop_loss_price:
-        name = lovely_stock_list.get(code, {}).get("name", code)
+        name = _get_stock_name(code)
+
+        # 장 변동성 시간대(09:00~09:30, 15:00~15:30)에는 손절을 보류한다
+        # 이 시간대의 급락은 일시적인 경우가 많아 종가가 회복되기도 함
+        if _is_stop_blackout():
+            now_str = datetime.now(_KST).strftime("%H:%M")
+            # 09:00~09:30이면 "장 시작 직후", 15:00~15:30이면 "장 마감 직전"으로 구분
+            now_hhmm = datetime.now(_KST).hour * 100 + datetime.now(_KST).minute
+            period   = "장 시작 직후(09:00~09:30)" if now_hhmm < 1000 else "장 마감 직전(15:00~15:30)"
+            msg = (
+                f"⚠️ 2N 손절 조건 발동 (보류 중)\n"
+                f"종목: {name}({code})\n"
+                f"현재가: {current_price:,}원 ≤ 손절가: {stop_loss_price:,}원\n"
+                f"사유: {period} 변동성 시간대({now_str}) — 다음 회차에 재확인"
+            )
+            print(f"[risk_guardian] {msg}")
+            telegram_alert.SendMessage(msg)
+            return False  # 이번 회차는 손절하지 않음
+
+        # 보류 시간대가 아니면 정상적으로 손절 발동
         print(f"[risk_guardian] {name}({code}) ❌ 하드 손절 발동! "
               f"현재가 {current_price:,}원 ≤ 손절가 {stop_loss_price:,}원")
         return True
@@ -90,16 +159,20 @@ def check_trailing_stop(code: str, current_price: int, pos: dict, indicators: di
     Returns:
         청산 이유 문자열 (예: "10일 신저가 경신") 또는 None (청산 조건 미충족)
     """
-    name         = lovely_stock_list.get(code, {}).get("name", code)
+    name         = _get_stock_name(code)
     day10_low    = indicators.get("day10_low", 0)
     ma5          = indicators.get("ma5",       0.0)
     avg_buy_price = pos.get("avg_buy_price",   0)
 
-    # 조건 ①: 10일 신저가 경신 확인
+    # 조건 ①: 10일 신저가 경신 확인 (수익·손실 여부와 관계없이 청산)
     if day10_low > 0 and current_price <= day10_low:
         print(f"[risk_guardian] {name}({code}) 📉 10일 신저가 경신! "
               f"현재가 {current_price:,}원 ≤ 10일 신저가 {day10_low:,}원")
-        return "10일 신저가 경신 익절"
+        # 수익권이면 익절, 손실권이면 손절로 구분
+        if avg_buy_price > 0 and current_price > avg_buy_price:
+            return "10일 신저가 경신 익절"
+        else:
+            return "10일 신저가 경신 손절"
 
     # 조건 ②: 5MA 하향 돌파 (수익권일 때만)
     if ma5 > 0 and current_price < ma5:
@@ -126,7 +199,8 @@ def place_exit_order(code: str, qty: int, reason: str, current_price: int = 0):
     """전량 매도 주문을 실행하고 포지션을 청산한다.
 
     실행 순서:
-    1. lovely_stock_list 포함 여부 확인 (안전장치)
+    1. 안전장치 확인 — 감시 목록에도 없고 보유 기록에도 없으면 주문 거부
+       (감시 목록에서 빠진 종목도 보유 기록이 있으면 청산 허용 — 보유 우선 원칙)
     2. 전량 매도 주문 실행
     3. held_stock_record.json에서 해당 종목 삭제
     4. 체결 원장(trade_ledger)에 기록 (수익률 포함)
@@ -138,12 +212,17 @@ def place_exit_order(code: str, qty: int, reason: str, current_price: int = 0):
         reason:        청산 이유 (예: "2N 하드 손절", "10일 신저가 경신 익절")
         current_price: 현재가 (수익률 계산용, 0이면 last_buy_price로 근사)
     """
-    # ① 안전장치: lovely_stock_list에 없는 종목은 절대 주문하지 않음
-    if code not in lovely_stock_list:
-        print(f"[risk_guardian] {code} lovely_stock_list 외 종목 → 매도 주문 거부")
-        return
+    # ① 안전장치: 감시 목록에도 없고 보유 기록에도 없는 종목은 매도 주문 거부
+    #    감시 목록에서 빠진 종목도 held_stock_record에 있으면 청산 허용 (보유 우선 원칙)
+    watchlist = get_watchlist()
+    if code not in watchlist:
+        held = load_position_state()
+        if code not in held:
+            print(f"[risk_guardian] {code} 감시 종목 외 + 보유 기록 없음 → 매도 주문 거부")
+            return
 
-    name = lovely_stock_list[code]["name"]
+    # 종목명: watchlist → held_stock_record 순으로 조회
+    name = _get_stock_name(code)
 
     if qty <= 0:
         print(f"[risk_guardian] {name}({code}) 매도 가능 수량=0 → 스킵")
@@ -168,6 +247,10 @@ def place_exit_order(code: str, qty: int, reason: str, current_price: int = 0):
     removed_pos    = position_state.pop(code, {})
     save_position_state(position_state)
 
+    # held_stock_record에 저장된 종목명으로 이름을 보완 (watchlist 날짜 불일치 대비)
+    if name == code:
+        name = removed_pos.get("stock_name", code)
+
     # ④ 체결 원장 기록
     avg_buy_price  = removed_pos.get("avg_buy_price", 0)
     last_buy_price = removed_pos.get("last_buy_price", 0)
@@ -181,24 +264,41 @@ def place_exit_order(code: str, qty: int, reason: str, current_price: int = 0):
     else:
         profit_rate = 0.0
 
-    # 매도 source: TURTLE_EXIT (손절/익절 구분은 note 필드로)
+    # 수익금 계산: (매도가 - 평균매입가) × 수량
+    profit_amount = int((sell_price - avg_buy_price) * qty) if avg_buy_price > 0 else 0
+
+    # 청산 사유(reason)에 따라 매매구분(source) 세분화
+    exit_source_map = {
+        "2N 하드 손절":       "EXIT_STOP",    # 손절
+        "10일 신저가 경신 익절": "EXIT_10LOW", # 10일 신저가 익절
+        "5MA 하향 돌파 익절":  "EXIT_5MA",    # 5MA 익절
+    }
+    exit_source = exit_source_map.get(reason, "EXIT_STOP")
+
     trade_ledger.append_trade({
-        "side":        "SELL",
-        "stock_code":  code,
-        "stock_name":  name,
-        "qty":         qty,
-        "unit_price":  sell_price,
-        "order_no":    order_no,
-        "order_type":  "MARKET",
-        "source":      "TURTLE_EXIT",
-        "profit_rate": profit_rate,     # 수익률 (%) — Google Sheets에 기록됨
-        "note":        reason,
+        "side":          "SELL",
+        "stock_code":    code,
+        "stock_name":    name,
+        "qty":           qty,
+        "unit_price":    sell_price,
+        "order_no":      order_no,
+        "order_type":    "MARKET",
+        "source":        exit_source,
+        "profit_rate":   profit_rate,    # 수익률 (%)
+        "profit_amount": profit_amount,  # 수익금 (원) — (매도가 - 평균매입가) × 수량
+        "note":          reason,
     })
 
-    # ⑤ 텔레그램 알림 (손절과 익절 이모지 구분)
-    is_stop_loss = "손절" in reason
-    emoji = "🔴" if is_stop_loss else "💰"
+    # ⑤ 텔레그램 알림 (손절과 익절 이모지 구분 — 실제 수익률 기준)
+    is_loss = profit_rate < 0
+    emoji = "🔴" if is_loss else "💰"
     profit_sign  = "+" if profit_rate >= 0 else ""
+    amount_sign  = "+" if profit_amount >= 0 else ""
+
+    # 실수령금액 계산: 거래금액 - (위탁수수료 + 거래세)
+    gross_amount = sell_price * qty
+    fee_total    = int(gross_amount * (trade_ledger.LS_BROKER_FEE_RATE + trade_ledger.SELL_TAX_RATE))
+    net_amount   = gross_amount - fee_total
 
     telegram_alert.SendMessage(
         f"{emoji} 포지션 청산\n"
@@ -206,6 +306,8 @@ def place_exit_order(code: str, qty: int, reason: str, current_price: int = 0):
         f"수량: {qty:,}주\n"
         f"평균 매입가: {avg_buy_price:,}원 → 매도가: {sell_price:,}원\n"
         f"수익률: {profit_sign}{profit_rate:.2f}%\n"
+        f"수익금: {amount_sign}{profit_amount:,}원\n"
+        f"실수령금액: {net_amount:,}원\n"
         f"사유: {reason}"
     )
 
@@ -249,20 +351,24 @@ def run_guardian():
         current_price = int(item["current_price"])
         sellable_qty  = item["sellable_qty"]
 
-        # lovely_stock_list 외 종목은 감시하지 않음 (수동 보유 종목 등)
-        if code not in lovely_stock_list:
-            print(f"[risk_guardian] {code} lovely_stock_list 외 종목 → 감시 스킵")
-            continue
+        watchlist = get_watchlist()
 
-        # held_stock_record에 기준값이 없으면 감시 불가
+        # held_stock_record에 없으면 수동 보유 종목으로 판단 → 스킵
+        # 감시 목록에 있더라도 보유 기록이 없으면 기준값을 알 수 없으므로 감시 불가
         if code not in position_state:
-            name = lovely_stock_list.get(code, {}).get("name", code)
+            name = watchlist.get(code, {}).get("name", code)
             print(f"[risk_guardian] {name}({code}) held_stock_record.json에 기록 없음 "
                   f"→ 수동 보유 종목으로 판단, 자동 청산 스킵")
             continue
 
+        # held_stock_record에 있으면 감시 목록 여부와 무관하게 손절·익절 감시 계속
+        # (09:05 이후 목록에서 빠진 종목도 보유 중이면 보호한다)
         pos  = position_state[code]
-        name = lovely_stock_list[code]["name"]
+        name = _get_stock_name(code)
+
+        if code not in watchlist:
+            print(f"[risk_guardian] {name}({code}) ⚠️ 감시 목록에서 제외됐지만 보유 중 "
+                  f"→ 손절·익절 감시 계속")
 
         print(f"[risk_guardian] {name}({code}) 감시 중 — 현재가: {current_price:,}원 "
               f"| 손절가: {pos.get('stop_loss_price', 0):,}원")

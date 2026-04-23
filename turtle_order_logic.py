@@ -33,10 +33,12 @@ import ls_client
 import indicator_calc
 import trade_ledger
 import telegram_alert
-from config import lovely_stock_list
+import sector_cache
+from config import get_watchlist
 
-# 보유 종목 상태 파일 경로 (미보유: unheld_stock_record.json 과 쌍)
-HELD_STOCK_RECORD_FILE = "held_stock_record.json"
+# 보유 종목 상태 파일 경로 (스크립트 위치 기준 절대 경로)
+_DIR = os.path.dirname(os.path.abspath(__file__))
+HELD_STOCK_RECORD_FILE = os.path.join(_DIR, "held_stock_record.json")
 
 
 # ─────────────────────────────────────────
@@ -75,6 +77,52 @@ def save_position_state(state: dict):
         print(f"[turtle] 포지션 상태 저장 오류: {e}")
 
 
+def get_total_units(state: dict) -> int:
+    """포트폴리오 전체 유닛 합계를 반환한다.
+
+    held_stock_record.json에 기록된 모든 종목의 current_unit을 더한 값이다.
+    신규 진입·피라미딩 허용 여부를 판단하는 데 사용한다 (상한: 12 Unit).
+
+    Args:
+        state: load_position_state()가 반환한 포지션 딕셔너리
+
+    Returns:
+        현재 보유 중인 전체 유닛 수 (정수)
+    """
+    return sum(pos.get("current_unit", 0) for pos in state.values())
+
+
+def get_sector_units(state: dict, sector: str) -> int:
+    """특정 테마에 속한 종목들의 유닛 합계를 반환한다.
+
+    같은 테마 종목에 유닛이 집중되는 것을 막기 위해 사용한다 (상한: 6 Unit).
+    테마 정보는 sector_cache.get_stock_sector()를 통해 sector_cache.json에서 읽는다.
+
+    Args:
+        state:  load_position_state()가 반환한 포지션 딕셔너리
+        sector: 확인할 테마 이름 (예: "인터넷은행", "제약바이오")
+                빈 문자열이면 아무 종목도 집계되지 않음 (제한 없음)
+
+    Returns:
+        해당 테마에 현재 보유 중인 유닛 수 합계 (정수)
+    """
+    if not sector:
+        return 0
+
+    return sum(
+        pos.get("current_unit", 0)
+        for code, pos in state.items()
+        if sector_cache.get_stock_sector(code) == sector
+    )
+
+
+# 포트폴리오 전체 유닛 상한
+MAX_TOTAL_UNITS = 12
+
+# 업종별 유닛 상한
+MAX_SECTOR_UNITS = 6
+
+
 # ─────────────────────────────────────────
 # Unit 수량 계산
 # ─────────────────────────────────────────
@@ -102,7 +150,7 @@ def calc_unit_size(code: str, price: int, atr_n: float, total_capital: int):
         (수량, 진입유형, 최대Unit) 튜플 또는 None(스킵)
         예: (10, "NORMAL", 4) 또는 (1, "EXCEPTION", 2) 또는 None
     """
-    name = lovely_stock_list.get(code, {}).get("name", code)
+    name = get_watchlist().get(code, {}).get("name", code)
 
     # 1주 가격이 총자본에서 차지하는 비율
     one_share_ratio = price / total_capital if total_capital > 0 else 1.0
@@ -136,6 +184,18 @@ def calc_unit_size(code: str, price: int, atr_n: float, total_capital: int):
     if qty <= 0:
         print(f"[turtle] {name}({code}) 계산된 수량=0 (ATR={atr_n:,.0f}) → 스킵")
         return None
+
+    # 1 Unit 최대 투자금액 상한 적용 (총자본 ÷ 12)
+    # ATR이 작은 종목은 수량이 과도하게 커질 수 있어서 상한으로 조정한다
+    max_unit_amount = total_capital / MAX_TOTAL_UNITS
+    max_qty_by_amount = int(max_unit_amount / price)
+    if max_qty_by_amount <= 0:
+        print(f"[turtle] {name}({code}) 1주 가격({price:,}원)이 Unit 상한({max_unit_amount:,.0f}원) 초과 → 스킵")
+        return None
+    if qty > max_qty_by_amount:
+        print(f"[turtle] {name}({code}) ATR 기반 수량 {qty}주 → Unit 금액 상한으로 {max_qty_by_amount}주로 축소 "
+              f"(상한: {max_unit_amount:,.0f}원 / 매수금: {max_qty_by_amount * price:,.0f}원)")
+        qty = max_qty_by_amount
 
     return (qty, "NORMAL", 4)
 
@@ -173,7 +233,7 @@ def check_pyramid_trigger(code: str, current_price: int, pos: dict, atr_n: float
     if current_price < next_pyramid_price:
         return False
 
-    name = lovely_stock_list.get(code, {}).get("name", code)
+    name = get_watchlist().get(code, {}).get("name", code)
     print(f"[turtle] {name}({code}) 피라미딩 조건 충족! "
           f"현재가 {current_price:,}원 ≥ 피라미딩 기준가 {next_pyramid_price:,}원 "
           f"(현재 {current_unit}/{max_unit} Unit)")
@@ -186,12 +246,13 @@ def check_pyramid_trigger(code: str, current_price: int, pos: dict, atr_n: float
 
 def place_entry_order(
     code: str, qty: int, price: int, atr_n: float,
-    entry_type: str, max_unit: int
+    entry_type: str, max_unit: int,
+    entry_source: str = "TARGET_30MIN"
 ):
     """1차 진입 주문을 실행하고 포지션 상태를 기록한다.
 
     실행 순서:
-    1. lovely_stock_list 포함 여부 확인 (안전장치)
+    1. 감시 종목(get_watchlist()) 포함 여부 확인 (안전장치)
     2. 매수 주문 실행
     3. held_stock_record.json에 포지션 상태 저장
     4. 체결 원장(trade_ledger)에 기록
@@ -200,21 +261,24 @@ def place_entry_order(
     저장되는 포지션 상태:
       - stop_loss_price    = price - 2 × atr_n  (손절가)
       - next_pyramid_price = price + 0.5 × atr_n (다음 피라미딩 기준가)
+      - entry_source       = 진입 경로 ("TARGET_30MIN" / "TURTLE_S1" / "TURTLE_S2")
 
     Args:
-        code:       종목코드 6자리
-        qty:        매수 수량 (주)
-        price:      현재가 (시장가 주문 기준 예상 가격)
-        atr_n:      ATR(N) 값
-        entry_type: "NORMAL" 또는 "EXCEPTION"
-        max_unit:   최대 Unit 횟수 (4 또는 2)
+        code:         종목코드 6자리
+        qty:          매수 수량 (주)
+        price:        현재가 (시장가 주문 기준 예상 가격)
+        atr_n:        ATR(N) 값
+        entry_type:   "NORMAL" 또는 "EXCEPTION"
+        max_unit:     최대 Unit 횟수 (4 또는 2)
+        entry_source: 진입 경로 ("TARGET_30MIN" / "TURTLE_S1" / "TURTLE_S2")
     """
-    # ① 안전장치: lovely_stock_list에 없는 종목은 절대 주문하지 않음
-    if code not in lovely_stock_list:
-        print(f"[turtle] {code} lovely_stock_list 외 종목 → 진입 주문 거부")
+    # ① 안전장치: 감시 종목이 아니면 절대 주문하지 않음
+    watchlist = get_watchlist()
+    if code not in watchlist:
+        print(f"[turtle] {code} 감시 종목 외 → 진입 주문 거부")
         return
 
-    name = lovely_stock_list[code]["name"]
+    name = watchlist[code]["name"]
 
     # ② 매수 주문 실행
     result = ls_client.place_order(code, qty, "BUY", "MARKET")
@@ -232,18 +296,28 @@ def place_entry_order(
 
     position_state = load_position_state()
     position_state[code] = {
+        "stock_name":         name,           # 종목명 저장 — 매도 시 watchlist 날짜 불일치 대비
         "current_unit":       1,
         "last_buy_price":     price,
-        "avg_buy_price":      price,      # 1차 진입이므로 평균가 = 진입가
+        "avg_buy_price":      price,          # 1차 진입이므로 평균가 = 진입가
         "stop_loss_price":    stop_loss_price,
         "next_pyramid_price": next_pyramid_price,
         "entry_type":         entry_type,
         "max_unit":           max_unit,
-        "total_qty":          qty,        # 피라미딩 시 평균가 계산에 사용
+        "total_qty":          qty,            # 피라미딩 시 평균가 계산에 사용
+        "entry_source":       entry_source,   # 진입 경로 (TARGET_30MIN / TURTLE_S1 / TURTLE_S2)
     }
     save_position_state(position_state)
 
     # ④ 체결 원장 기록
+    # 진입 경로(entry_source)에 따라 매매구분(source) 세분화
+    source_map = {
+        "TARGET_30MIN": "ENTRY_30MIN",   # 목표가 30분 가드 진입
+        "TURTLE_S1":    "ENTRY_S1",      # 20일 신고가 돌파 진입
+        "TURTLE_S2":    "ENTRY_S2",      # 55일 신고가 돌파 진입
+    }
+    ledger_source = source_map.get(entry_source, "ENTRY_30MIN")
+
     trade_ledger.append_trade({
         "side":        "BUY",
         "stock_code":  code,
@@ -252,17 +326,22 @@ def place_entry_order(
         "unit_price":  price,
         "order_no":    order_no,
         "order_type":  "MARKET",
-        "source":      "TURTLE_ENTRY",
+        "source":      ledger_source,
         "note":        f"1차 진입({entry_type}) | 손절가: {stop_loss_price:,}원 | "
                        f"피라미딩: {next_pyramid_price:,}원",
     })
 
     # ⑤ 텔레그램 알림
+    source_label = {
+        "TURTLE_S2":   "터틀S2(55일신고가)",
+        "TURTLE_S1":   "터틀S1(20일신고가)",
+        "TARGET_30MIN": "목표가30분",
+    }.get(entry_source, entry_source)
     telegram_alert.SendMessage(
         f"✅ 터틀 진입\n"
         f"종목: {name}({code})\n"
         f"수량: {qty:,}주 @{price:,}원\n"
-        f"진입 유형: {entry_type} (최대 {max_unit} Unit)\n"
+        f"진입 경로: {source_label} / 유형: {entry_type} (최대 {max_unit} Unit)\n"
         f"손절가: {stop_loss_price:,}원 | 다음 피라미딩: {next_pyramid_price:,}원"
     )
 
@@ -284,12 +363,13 @@ def place_pyramid_order(code: str, qty: int, price: int, atr_n: float):
         price:  현재가
         atr_n:  ATR(N) 값
     """
-    # ① 안전장치: lovely_stock_list에 없는 종목은 절대 주문하지 않음
-    if code not in lovely_stock_list:
-        print(f"[turtle] {code} lovely_stock_list 외 종목 → 피라미딩 주문 거부")
+    # ① 안전장치: 감시 종목이 아니면 절대 주문하지 않음
+    watchlist = get_watchlist()
+    if code not in watchlist:
+        print(f"[turtle] {code} 감시 종목 외 → 피라미딩 주문 거부")
         return
 
-    name = lovely_stock_list[code]["name"]
+    name = watchlist[code]["name"]
 
     # ② 기존 포지션 상태 확인
     position_state = load_position_state()
@@ -352,7 +432,7 @@ def place_pyramid_order(code: str, qty: int, price: int, atr_n: float):
         "unit_price":  price,
         "order_no":    order_no,
         "order_type":  "MARKET",
-        "source":      "TURTLE_PYRAMID",
+        "source":      "PYRAMID",
         "note":        f"{new_unit}차 피라미딩 | 손절가: {new_stop_loss_price:,}원",
     })
 
@@ -379,8 +459,8 @@ def run_orders(entry_signals: list):
     3. 기존 보유 종목 피라미딩 체크 및 실행
 
     Args:
-        entry_signals: timer_agent.run_timer_check()가 반환한 진입 신호 종목 코드 목록
-                       예: ["005930", "064350"]
+        entry_signals: timer_agent.run_timer_check()가 반환한 진입 신호 목록
+                       예: [{"code": "005930", "entry_source": "TURTLE_S1"}, ...]
     """
     print("[turtle] 주문 처리 시작")
 
@@ -396,11 +476,15 @@ def run_orders(entry_signals: list):
     position_state = load_position_state()
     held_codes     = list(position_state.keys())
 
-    # ③ 현재가 조회 대상: 진입 신호 종목 + 기존 보유 종목
-    #    lovely_stock_list 외 종목은 미리 걸러냄
+    # ③ 진입 신호 딕셔너리 변환 (종목코드 → entry_source)
+    entry_signal_map = {s["code"]: s["entry_source"] for s in entry_signals}
+    signal_codes     = list(entry_signal_map.keys())
+
+    # ④ 현재가 조회 대상: 진입 신호 종목 + 기존 보유 종목
+    watchlist = get_watchlist()
     price_query_codes = list({
-        c for c in (entry_signals + held_codes)
-        if c in lovely_stock_list
+        c for c in (signal_codes + held_codes)
+        if c in watchlist
     })
 
     if not price_query_codes:
@@ -413,15 +497,18 @@ def run_orders(entry_signals: list):
     # ─────────────────────────────────────
     # [A] 신규 진입 처리
     # ─────────────────────────────────────
-    for code in entry_signals:
-        # 안전장치: lovely_stock_list 외 종목 스킵
-        if code not in lovely_stock_list:
-            print(f"[turtle] {code} lovely_stock_list 외 종목 → 진입 스킵")
+    for signal in entry_signals:
+        code         = signal["code"]
+        entry_source = signal["entry_source"]
+
+        # 안전장치: 감시 종목 외 종목 스킵
+        if code not in watchlist:
+            print(f"[turtle] {code} 감시 종목 외 → 진입 스킵")
             continue
 
         # 이미 보유 중인 종목은 진입 스킵 (피라미딩 구간에서 처리)
         if code in position_state:
-            print(f"[turtle] {lovely_stock_list[code]['name']}({code}) 이미 보유 중 → 신규 진입 스킵")
+            print(f"[turtle] {watchlist[code]['name']}({code}) 이미 보유 중 → 신규 진입 스킵")
             continue
 
         current_price = prices.get(code, 0)
@@ -429,8 +516,8 @@ def run_orders(entry_signals: list):
             print(f"[turtle] {code} 현재가 조회 실패 → 진입 스킵")
             continue
 
-        # 지표 계산 (ATR 등) — API 속도 제한 방지
-        time.sleep(1.0)
+        # 지표 계산 (ATR 등) — API 속도 제한 방지 (종목 간 5초 대기)
+        time.sleep(5.0)
         indicators = indicator_calc.get_all_indicators(code)
         atr_n      = indicators.get("atr", 0.0)
         if atr_n <= 0:
@@ -444,8 +531,28 @@ def run_orders(entry_signals: list):
 
         qty, entry_type, max_unit = result
 
-        # 진입 주문 실행
-        place_entry_order(code, qty, current_price, atr_n, entry_type, max_unit)
+        # 포트폴리오 전체·업종별 유닛 한도 확인
+        # 직전 진입으로 파일이 갱신됐을 수 있으므로 파일을 다시 읽어서 정확한 합계를 구함
+        fresh_state         = load_position_state()
+        current_total_units = get_total_units(fresh_state)
+        entry_name          = watchlist.get(code, {}).get("name", code)
+
+        if current_total_units >= MAX_TOTAL_UNITS:
+            print(f"[turtle] 포트폴리오 유닛 한도({MAX_TOTAL_UNITS} Unit) 도달 → "
+                  f"{entry_name}({code}) 신규 진입 스킵 (현재 {current_total_units} Unit)")
+            continue
+
+        # 테마별 한도 확인
+        entry_sector = sector_cache.get_stock_sector(code)
+        sector_units = get_sector_units(fresh_state, entry_sector)
+        if entry_sector and sector_units >= MAX_SECTOR_UNITS:
+            print(f"[turtle] 테마 유닛 한도({MAX_SECTOR_UNITS} Unit) 도달 → "
+                  f"{entry_name}({code}) 신규 진입 스킵 "
+                  f"(테마: {entry_sector}, 현재 {sector_units} Unit)")
+            continue
+
+        # 진입 주문 실행 (진입 경로 전달)
+        place_entry_order(code, qty, current_price, atr_n, entry_type, max_unit, entry_source)
 
     # ─────────────────────────────────────
     # [B] 기존 포지션 피라미딩 처리
@@ -454,8 +561,8 @@ def run_orders(entry_signals: list):
     position_state = load_position_state()
 
     for code, pos in list(position_state.items()):
-        # 안전장치: lovely_stock_list 외 종목 스킵
-        if code not in lovely_stock_list:
+        # 안전장치: 감시 종목 외 종목 스킵 (수동 보유 종목 등)
+        if code not in watchlist:
             continue
 
         current_price = prices.get(code, 0)
@@ -463,14 +570,21 @@ def run_orders(entry_signals: list):
             print(f"[turtle] {code} 현재가 조회 실패 → 피라미딩 스킵")
             continue
 
-        # 지표 계산 — API 속도 제한 방지
-        time.sleep(1.0)
+        # 피라미딩 가격 조건 사전 체크 (파일에 저장된 값으로 먼저 판단)
+        # → 조건이 안 되면 API 호출·대기 없이 즉시 넘어감
+        if pos.get("current_unit", 0) >= pos.get("max_unit", 4):
+            continue  # 이미 최대 Unit
+        if current_price < pos.get("next_pyramid_price", 0):
+            continue  # 피라미딩 기준가 미달
+
+        # 가격 조건 충족 종목만 API 호출 (종목 간 5초 대기)
+        time.sleep(5.0)
         indicators = indicator_calc.get_all_indicators(code)
         atr_n      = indicators.get("atr", 0.0)
         if atr_n <= 0:
             continue
 
-        # 피라미딩 트리거 확인
+        # ATR 포함 정밀 피라미딩 트리거 확인
         if not check_pyramid_trigger(code, current_price, pos, atr_n):
             continue
 
@@ -480,6 +594,25 @@ def run_orders(entry_signals: list):
             continue
 
         qty = result[0]  # qty만 사용 (entry_type, max_unit은 기존 pos에서 관리)
+
+        # 포트폴리오 전체·업종별 유닛 한도 확인 (피라미딩 직전 재확인)
+        fresh_state         = load_position_state()
+        current_total_units = get_total_units(fresh_state)
+        pyramid_name        = get_watchlist().get(code, {}).get("name", code)
+
+        if current_total_units >= MAX_TOTAL_UNITS:
+            print(f"[turtle] 포트폴리오 유닛 한도({MAX_TOTAL_UNITS} Unit) 도달 → "
+                  f"{pyramid_name}({code}) 피라미딩 스킵 (현재 {current_total_units} Unit)")
+            continue
+
+        # 테마별 한도 확인
+        pyramid_sector = sector_cache.get_stock_sector(code)
+        sector_units   = get_sector_units(fresh_state, pyramid_sector)
+        if pyramid_sector and sector_units >= MAX_SECTOR_UNITS:
+            print(f"[turtle] 테마 유닛 한도({MAX_SECTOR_UNITS} Unit) 도달 → "
+                  f"{pyramid_name}({code}) 피라미딩 스킵 "
+                  f"(테마: {pyramid_sector}, 현재 {sector_units} Unit)")
+            continue
 
         # 피라미딩 주문 실행
         place_pyramid_order(code, qty, current_price, atr_n)

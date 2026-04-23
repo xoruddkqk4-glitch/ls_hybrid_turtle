@@ -10,6 +10,7 @@
 #   prices = ls_client.get_multi_price(["005930", "034020"])
 
 import os
+import time
 from datetime import datetime, timedelta
 
 import pytz
@@ -19,7 +20,10 @@ from programgarden_finance.ls.korea_stock.market.t8407.blocks import T8407InBloc
 from programgarden_finance.ls.korea_stock.chart.t8451.blocks import T8451InBlock
 from programgarden_finance.ls.korea_stock.chart.t8452.blocks import T8452InBlock
 from programgarden_finance.ls.korea_stock.order.CSPAT00601.blocks import CSPAT00601InBlock1
-from programgarden_finance.ls.korea_stock.accno.CSPAQ12300.blocks import CSPAQ12300InBlock1
+from programgarden_finance.ls.korea_stock.accno.t0424.blocks import T0424InBlock
+from programgarden_finance.ls.korea_stock.sector.t1532.blocks import T1532InBlock
+from programgarden_finance.ls.korea_stock.ranking.t1463.blocks import T1463InBlock
+from programgarden_finance.ls.korea_stock.market.t1442.blocks import T1442InBlock
 
 load_dotenv()
 
@@ -144,33 +148,52 @@ def get_daily_chart(code: str, count: int = 25) -> list:
     """
     _check_login()
 
-    try:
-        response = _ls.korea_stock().chart().t8451(
-            T8451InBlock(
-                shcode=code,
-                gubun="2",      # 2 = 일봉
-                qrycnt=count,
-                sujung="Y",     # 수정주가 적용 (액면분할 등 반영)
-            )
-        ).req()
+    # 호출 제한(HTTP 500) 시 재시도 설정
+    _MAX_RETRIES = 3    # 재시도 횟수
+    _RETRY_WAIT  = 10.0 # 재시도 대기 시간 (초)
 
-        # 날짜 기준 오름차순(오래된 것 → 최신 순)으로 정렬
-        items = sorted(response.block1, key=lambda x: x.date)
-        result = []
-        for item in items:
-            result.append({
-                "date":   item.date,
-                "open":   item.open,
-                "high":   item.high,
-                "low":    item.low,
-                "close":  item.close,
-                "volume": item.jdiff_vol,
-            })
-        return result
+    for attempt in range(_MAX_RETRIES):
+        try:
+            response = _ls.korea_stock().chart().t8451(
+                T8451InBlock(
+                    shcode=code,
+                    gubun="2",      # 2 = 일봉
+                    qrycnt=count,
+                    sujung="Y",     # 수정주가 적용 (액면분할 등 반영)
+                )
+            ).req()
 
-    except Exception as e:
-        print(f"[ls_client] 일봉 차트 조회 오류 ({code}): {e}")
-        return []
+            # 날짜 기준 오름차순(오래된 것 → 최신 순)으로 정렬
+            items = sorted(response.block1, key=lambda x: x.date)
+            result = []
+            for item in items:
+                result.append({
+                    "date":   item.date,
+                    "open":   item.open,
+                    "high":   item.high,
+                    "low":    item.low,
+                    "close":  item.close,
+                    "volume": item.jdiff_vol,
+                })
+            return result
+
+        except Exception as e:
+            err_str = str(e)
+            # '호출 거래건수 초과(HTTP 500)' 오류이면 대기 후 재시도
+            is_rate_limit = "500" in err_str or "호출 거래건수" in err_str
+            if is_rate_limit and attempt < _MAX_RETRIES - 1:
+                print(
+                    f"[ls_client] t8451 호출 제한 오류 ({code}) → "
+                    f"{_RETRY_WAIT:.0f}초 후 재시도 "
+                    f"({attempt + 1}/{_MAX_RETRIES}): {err_str}"
+                )
+                time.sleep(_RETRY_WAIT)
+            else:
+                # 재시도 횟수 초과이거나 다른 종류의 오류
+                print(f"[ls_client] 일봉 차트 조회 오류 ({code}): {e}")
+                return []
+
+    return []
 
 
 def get_minute_chart(code: str, minute: int = 240, count: int = 25) -> list:
@@ -190,44 +213,63 @@ def get_minute_chart(code: str, minute: int = 240, count: int = 25) -> list:
     """
     _check_login()
 
-    try:
-        # t8452는 sdate/edate 없이 호출하면 빈 결과를 반환하므로 명시적으로 지정
-        # edate = 오늘, sdate = 오늘로부터 (count × minute / 390 + 5) 영업일 전
-        # 390분(하루 장 시간) 기준으로 count개 캔들이 필요한 날수를 계산
-        today     = datetime.now(_KST)
-        days_back = max(int(count * minute / 390) + 10, 30)  # 여유있게 계산
-        sdate     = (today - timedelta(days=days_back)).strftime("%Y%m%d")
-        edate     = today.strftime("%Y%m%d")
+    # 호출 제한(HTTP 500) 시 재시도 설정
+    _MAX_RETRIES = 3    # 재시도 횟수
+    _RETRY_WAIT  = 10.0 # 재시도 대기 시간 (초)
 
-        response = _ls.korea_stock().chart().t8452(
-            T8452InBlock(
-                shcode=code,
-                ncnt=minute,    # 분 단위 (240 = 4시간봉)
-                qrycnt=count,
-                nday="0",       # 0: 날짜 범위 방식 사용
-                sdate=sdate,    # 시작일자 (YYYYMMDD)
-                edate=edate,    # 종료일자 (YYYYMMDD)
-            )
-        ).req()
+    # t8452는 sdate/edate 없이 호출하면 빈 결과를 반환하므로 명시적으로 지정
+    # edate = 오늘, sdate = 오늘로부터 (count × minute / 390 + 5) 영업일 전
+    # 390분(하루 장 시간) 기준으로 count개 캔들이 필요한 날수를 계산
+    today     = datetime.now(_KST)
+    days_back = max(int(count * minute / 390) + 10, 30)  # 여유있게 계산
+    sdate     = (today - timedelta(days=days_back)).strftime("%Y%m%d")
+    edate     = today.strftime("%Y%m%d")
 
-        # 날짜+시간 기준 오름차순 정렬
-        items = sorted(response.block, key=lambda x: (x.date, x.time))
-        result = []
-        for item in items:
-            result.append({
-                "date":   item.date,
-                "time":   item.time,
-                "open":   item.open,
-                "high":   item.high,
-                "low":    item.low,
-                "close":  item.close,
-                "volume": item.jdiff_vol,
-            })
-        return result
+    for attempt in range(_MAX_RETRIES):
+        try:
+            response = _ls.korea_stock().chart().t8452(
+                T8452InBlock(
+                    shcode=code,
+                    ncnt=minute,    # 분 단위 (240 = 4시간봉)
+                    qrycnt=count,
+                    nday="0",       # 0: 날짜 범위 방식 사용
+                    sdate=sdate,    # 시작일자 (YYYYMMDD)
+                    edate=edate,    # 종료일자 (YYYYMMDD)
+                )
+            ).req()
 
-    except Exception as e:
-        print(f"[ls_client] 분봉 차트 조회 오류 ({code}, {minute}분): {e}")
-        return []
+            # 날짜+시간 기준 오름차순 정렬
+            items = sorted(response.block, key=lambda x: (x.date, x.time))
+            result = []
+            for item in items:
+                result.append({
+                    "date":   item.date,
+                    "time":   item.time,
+                    "open":   item.open,
+                    "high":   item.high,
+                    "low":    item.low,
+                    "close":  item.close,
+                    "volume": item.jdiff_vol,
+                })
+            return result
+
+        except Exception as e:
+            err_str = str(e)
+            # '호출 거래건수 초과(HTTP 500)' 오류이면 대기 후 재시도
+            is_rate_limit = "500" in err_str or "호출 거래건수" in err_str
+            if is_rate_limit and attempt < _MAX_RETRIES - 1:
+                print(
+                    f"[ls_client] t8452 호출 제한 오류 ({code}) → "
+                    f"{_RETRY_WAIT:.0f}초 후 재시도 "
+                    f"({attempt + 1}/{_MAX_RETRIES}): {err_str}"
+                )
+                time.sleep(_RETRY_WAIT)
+            else:
+                # 재시도 횟수 초과이거나 다른 종류의 오류
+                print(f"[ls_client] 분봉 차트 조회 오류 ({code}, {minute}분): {e}")
+                return []
+
+    return []
 
 
 # ─────────────────────────────────────────
@@ -235,23 +277,23 @@ def get_minute_chart(code: str, minute: int = 240, count: int = 25) -> list:
 # ─────────────────────────────────────────
 
 def get_total_capital() -> int:
-    """계좌의 예탁자산총액(총 자본)을 조회한다 (CSPAQ12300).
+    """계좌의 추정순자산(총 자본)을 조회한다 (t0424).
 
     터틀 트레이딩의 Unit 수량 계산 시 '총 자본' 값으로 사용한다.
-    예탁자산총액 = 보유주식 평가금액 + 예수금(현금)
+    추정순자산 = 보유주식 평가금액 + 예수금(현금)
 
     Returns:
-        예탁자산총액 (원 단위 정수). 조회 실패 시 0.
+        추정순자산 (원 단위 정수). 조회 실패 시 0.
     """
     _check_login()
 
     try:
-        response = _ls.korea_stock().accno().cspaq12300(
-            CSPAQ12300InBlock1()
+        response = _ls.korea_stock().accno().t0424(
+            T0424InBlock(prcgb="1", chegb="2")
         ).req()
 
-        if response.block2:
-            return response.block2.DpsastTotamt
+        if response.cont_block:
+            return response.cont_block.sunamt
         return 0
 
     except Exception as e:
@@ -260,7 +302,7 @@ def get_total_capital() -> int:
 
 
 def get_balance() -> list:
-    """보유 종목별 잔고를 조회한다 (CSPAQ12300).
+    """보유 종목별 잔고를 조회한다 (t0424).
 
     risk_guardian.py에서 보유 종목 현황 확인에 사용한다.
 
@@ -273,24 +315,24 @@ def get_balance() -> list:
     _check_login()
 
     try:
-        response = _ls.korea_stock().accno().cspaq12300(
-            CSPAQ12300InBlock1()
+        response = _ls.korea_stock().accno().t0424(
+            T0424InBlock(prcgb="1", chegb="2")
         ).req()
 
         result = []
-        for item in response.block3:
+        for item in response.block:
             # 종목코드 정규화: 모의투자 응답에서 "A005930" 형식으로 올 수 있음
-            code = item.IsuNo.strip()
+            code = item.expcode.strip()
             if code.startswith("A"):
                 code = code[1:]  # 앞의 "A" 제거
 
             result.append({
                 "code":          code,
-                "name":          item.IsuNm.strip(),
-                "qty":           item.BalQty,
-                "avg_price":     float(item.AvrUprc),
-                "current_price": float(item.NowPrc),
-                "sellable_qty":  item.SellAbleQty,
+                "name":          item.hname.strip(),
+                "qty":           item.janqty,
+                "avg_price":     float(item.pamt),
+                "current_price": float(item.price),
+                "sellable_qty":  item.mdposqt,
             })
         return result
 
@@ -359,6 +401,305 @@ def place_order(code: str, qty: int, side: str, order_type: str = "MARKET") -> d
         return {"success": False, "order_no": "", "message": str(e)}
 
 
+def get_portfolio_summary() -> dict:
+    """포트폴리오 전체 요약 정보를 조회한다 (t0424).
+
+    record_daily_snapshot.py에서 일일 스냅샷 기록 시 사용한다.
+
+    Returns:
+        {
+            "total_capital":    추정순자산 (주식+현금, 원),
+            "stock_value":      주식평가액 (원),
+            "cash":             예수금 (총자산 - 주식평가액, 원),
+            "purchase_amount":  매입금액 (원),
+            "unrealized_pnl":   평가손익 (원),
+            "realized_pnl":     실현손익 (원),
+            "holdings_count":   보유 종목 수,
+            "holdings_names":   보유 종목명 (쉼표 구분 문자열),
+        }
+        조회 실패 시 빈 딕셔너리.
+    """
+    _check_login()
+
+    try:
+        response = _ls.korea_stock().accno().t0424(
+            T0424InBlock(prcgb="1", chegb="2")
+        ).req()
+
+        if not response.cont_block:
+            return {}
+
+        cb = response.cont_block
+
+        # 보유 종목명 + 수익률 목록 — 수익률 기준 내림차순 정렬
+        items_with_rate = [
+            (item.sunikrt, item.hname.strip())
+            for item in response.block
+            if item.hname.strip()
+        ]
+        items_with_rate.sort(key=lambda x: x[0], reverse=True)  # 수익률 높은 종목이 앞으로
+        names = [f"{name}({rate:+.2f}%)" for rate, name in items_with_rate]
+
+        return {
+            "total_capital":   cb.sunamt,                  # 추정순자산
+            "stock_value":     cb.tappamt,                 # 주식평가액
+            "cash":            cb.sunamt - cb.tappamt,     # 예수금 (총자산 - 주식)
+            "purchase_amount": cb.mamt,                    # 매입금액
+            "unrealized_pnl":  cb.tdtsunik,                # 평가손익 (미실현)
+            "realized_pnl":    cb.dtsunik,                 # 실현손익
+            "holdings_count":  len(response.block),        # 보유 종목 수
+            "holdings_names":  ", ".join(names),           # 보유 종목명
+        }
+
+    except Exception as e:
+        print(f"[ls_client] 포트폴리오 요약 조회 오류: {e}")
+        return {}
+
+
+def get_stock_themes(code: str) -> list:
+    """종목이 속한 테마 목록을 조회한다 (t1532 종목별테마).
+
+    한 종목은 여러 테마에 동시에 속할 수 있다.
+    예: 케이뱅크 → ["인터넷은행", "핀테크", "카카오뱅크관련"]
+
+    Args:
+        code: 종목코드 6자리 (예: "279570")
+
+    Returns:
+        [{"tmcode": "001", "tmname": "인터넷은행"}, ...] 형태의 리스트
+        테마가 없거나 조회 실패 시 빈 리스트
+    """
+    _check_login()
+
+    try:
+        response = _ls.korea_stock().sector().t1532(
+            T1532InBlock(shcode=code)
+        ).req()
+
+        return [
+            {
+                "tmcode": item.tmcode.strip(),
+                "tmname": item.tmname.strip(),
+            }
+            for item in response.block
+            if item.tmname.strip()  # 이름이 빈 항목은 제외
+        ]
+
+    except Exception as e:
+        print(f"[ls_client] 종목별 테마 조회 오류 ({code}): {e}")
+        return []
+
+
 def is_paper_trading() -> bool:
     """현재 모의투자 모드 여부를 반환한다."""
     return _paper_trading
+
+
+# ─────────────────────────────────────────
+# 종목 선정 (스크리닝) 관련 조회
+# ─────────────────────────────────────────
+
+# t1463 jc_num 비트마스크: 관리종목(128) + 시장경보(256) + 거래정지(512) + 우선주(16384)
+_JC_NUM  = 128 + 256 + 512 + 16384   # = 17280
+# t1463 jc_num2 비트마스크: ETF(1) + ETN(8) + 투자주의(16) + 투자위험(32) + 위험예고(64)
+_JC_NUM2 = 1 + 8 + 16 + 32 + 64      # = 121
+
+
+def get_trading_value_ranking(n: int = 200, prev_day: bool = False) -> list:
+    """거래대금 상위 종목 목록을 조회한다 (t1463).
+
+    API 파라미터 레벨에서 ETF·ETN·관리종목·우선주·투자경고·위험 종목을
+    미리 걸러주므로 별도 필터 없이 바로 사용할 수 있다.
+
+    Args:
+        n:        가져올 종목 수 (기본 200)
+        prev_day: True → 전일 거래대금 기준 / False → 당일 거래대금 기준
+
+    Returns:
+        거래대금 내림차순으로 정렬된 종목 리스트.
+        [
+            {
+                "code":       "005930",  # 종목코드 6자리
+                "name":       "삼성전자", # 종목명
+                "price":      75000,     # 현재가 (원)
+                "value":      500000,    # 거래대금 (백만원)
+                "jnil_value": 480000,    # 전일거래대금 (백만원)
+                "total_cap":  4500000,   # 시가총액 (백만원)
+                "volume_rank": 1         # 거래대금 순위 (1이 최고)
+            },
+            ...
+        ]
+        조회 실패 시 빈 리스트.
+    """
+    _check_login()
+
+    # 전일 기준이면 "1", 당일 기준이면 "0"
+    jnilgubun = "1" if prev_day else "0"
+
+    result    = []
+    idx       = 0      # 연속조회키 (최초 0)
+    rank      = 1      # 거래대금 순위 (1부터 시작)
+
+    # 무한 루프 방지: 최대 페이지 수 상한
+    _MAX_PAGES    = 30   # 페이지당 보통 10~20개이므로 30페이지면 충분
+    # 호출 제한(HTTP 500) 시 재시도 설정
+    _MAX_RETRIES  = 3    # 재시도 횟수
+    _RETRY_WAIT   = 10.0 # 재시도 대기 시간 (초)
+
+    try:
+        page = 0
+        while len(result) < n:
+            page += 1
+            if page > _MAX_PAGES:
+                # 비정상적으로 페이지가 너무 많으면 중단 (무한 루프 방지)
+                print(f"[ls_client] t1463 최대 페이지({_MAX_PAGES}) 도달 → 조회 중단")
+                break
+
+            # ── 재시도 루프 ──────────────────────────────────────
+            resp = None
+            for attempt in range(_MAX_RETRIES):
+                try:
+                    resp = _ls.korea_stock().ranking().t1463(
+                        T1463InBlock(
+                            gubun="0",           # 전체 (KOSPI + KOSDAQ)
+                            jnilgubun=jnilgubun,
+                            jc_num=_JC_NUM,      # 관리·경보·정지·우선주 제거
+                            jc_num2=_JC_NUM2,    # ETF·ETN·투자주의/위험 제거
+                            sprice=0,            # 가격 하한 필터 없음 (stock_screener에서 별도 처리)
+                            eprice=0,            # 가격 상한 필터 없음
+                            volume=0,            # 거래량 필터 없음
+                            idx=idx,
+                        )
+                    ).req()
+                    break  # 성공 시 재시도 루프 탈출
+
+                except Exception as e:
+                    err_str = str(e)
+                    # '호출 거래건수 초과(HTTP 500)' 오류이면 대기 후 재시도
+                    is_rate_limit = "500" in err_str or "호출 거래건수" in err_str
+                    if is_rate_limit and attempt < _MAX_RETRIES - 1:
+                        print(
+                            f"[ls_client] t1463 호출 제한 오류 → "
+                            f"{_RETRY_WAIT:.0f}초 후 재시도 "
+                            f"({attempt + 1}/{_MAX_RETRIES}): {err_str}"
+                        )
+                        time.sleep(_RETRY_WAIT)
+                    else:
+                        # 재시도 횟수 초과이거나 다른 종류의 오류 → 상위로 전파
+                        raise
+            # ─────────────────────────────────────────────────────
+
+            if resp is None or not resp.block:
+                # 더 이상 데이터 없음
+                break
+
+            for item in resp.block:
+                code = item.shcode.strip()
+                if not code:
+                    continue
+
+                result.append({
+                    "code":        code,
+                    "name":        item.hname.strip(),
+                    "price":       item.price,
+                    "value":       item.value,       # 거래대금 (백만원)
+                    "jnil_value":  item.jnilvalue,   # 전일거래대금 (백만원)
+                    "total_cap":   item.total,       # 시가총액 (백만원)
+                    "volume_rank": rank,
+                })
+                rank += 1
+
+                if len(result) >= n:
+                    break
+
+            # 연속조회: cont_block이 있으면 idx 갱신, 없으면 종료
+            if resp.cont_block and resp.cont_block.idx:
+                idx = resp.cont_block.idx
+                time.sleep(1.0)  # 연속 페이지 조회 간 대기 (0.3 → 1.0초로 증가)
+            else:
+                break
+
+        day_label = "전일" if prev_day else "당일"
+        print(f"[ls_client] 거래대금상위 조회 완료: {len(result)}개 ({day_label} 기준, {page}페이지)")
+        return result
+
+    except Exception as e:
+        print(f"[ls_client] 거래대금상위 조회 오류: {e}")
+        return []
+
+
+def get_52week_high_stocks() -> list:
+    """52주 신고가를 오늘 돌파한 종목 목록을 조회한다 (t1442).
+
+    ETF·관리종목·우선주 등은 거래대금 랭킹과 동일한 비트마스크로 제거한다.
+
+    Returns:
+        [
+            {
+                "code":      "005930",  # 종목코드 6자리
+                "name":      "삼성전자", # 종목명
+                "price":     75000,     # 현재가 (원)
+                "prev_high": 74500,     # 직전 52주 최고가 (pastprice 필드)
+            },
+            ...
+        ]
+        조회 실패 시 빈 리스트.
+    """
+    _check_login()
+
+    result     = []
+    idx        = 0    # 연속조회키
+    _MAX_PAGES = 30   # 무한 루프 방지 상한
+
+    try:
+        page = 0
+        while True:
+            page += 1
+            if page > _MAX_PAGES:
+                # 비정상적으로 페이지가 너무 많으면 중단 (무한 루프 방지)
+                print(f"[ls_client] t1442 최대 페이지({_MAX_PAGES}) 도달 → 조회 중단")
+                break
+
+            resp = _ls.korea_stock().market().t1442(
+                T1442InBlock(
+                    gubun="0",    # 전체 (KOSPI + KOSDAQ)
+                    type1="0",    # 신고가
+                    type2="6",    # 52주
+                    type3="0",    # 일시돌파 (오늘 처음 돌파한 종목)
+                    jc_num=_JC_NUM,
+                    jc_num2=_JC_NUM2,
+                    sprice=0,
+                    eprice=0,
+                    volume=0,
+                    idx=idx,
+                )
+            ).req()
+
+            if not resp.block:
+                break
+
+            for item in resp.block:
+                code = item.shcode.strip()
+                if not code:
+                    continue
+
+                result.append({
+                    "code":      code,
+                    "name":      item.hname.strip(),
+                    "price":     item.price,
+                    "prev_high": item.pastprice,  # 직전 52주 최고가
+                })
+
+            # 연속조회
+            if resp.cont_block and resp.cont_block.idx:
+                idx = resp.cont_block.idx
+                time.sleep(1.0)  # 연속 페이지 조회 간 대기 (0.3 → 1.0초로 증가)
+            else:
+                break
+
+        print(f"[ls_client] 52주 신고가 돌파 종목 조회 완료: {len(result)}개 ({page}페이지)")
+        return result
+
+    except Exception as e:
+        print(f"[ls_client] 52주 신고가 조회 오류: {e}")
+        return []
