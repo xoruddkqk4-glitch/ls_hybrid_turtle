@@ -81,7 +81,7 @@ def get_total_units(state: dict) -> int:
     """포트폴리오 전체 유닛 합계를 반환한다.
 
     held_stock_record.json에 기록된 모든 종목의 current_unit을 더한 값이다.
-    신규 진입·피라미딩 허용 여부를 판단하는 데 사용한다 (상한: 12 Unit).
+    신규 진입·피라미딩 허용 여부를 판단하는 데 사용한다 (상한: 15 Unit).
 
     Args:
         state: load_position_state()가 반환한 포지션 딕셔너리
@@ -117,7 +117,7 @@ def get_sector_units(state: dict, sector: str) -> int:
 
 
 # 포트폴리오 전체 유닛 상한
-MAX_TOTAL_UNITS = 12
+MAX_TOTAL_UNITS = 15
 
 # 업종별 유닛 상한
 MAX_SECTOR_UNITS = 6
@@ -185,7 +185,7 @@ def calc_unit_size(code: str, price: int, atr_n: float, total_capital: int):
         print(f"[turtle] {name}({code}) 계산된 수량=0 (ATR={atr_n:,.0f}) → 스킵")
         return None
 
-    # 1 Unit 최대 투자금액 상한 적용 (총자본 ÷ 12)
+    # 1 Unit 최대 투자금액 상한 적용 (총자본 ÷ 15)
     # ATR이 작은 종목은 수량이 과도하게 커질 수 있어서 상한으로 조정한다
     max_unit_amount = total_capital / MAX_TOTAL_UNITS
     max_qty_by_amount = int(max_unit_amount / price)
