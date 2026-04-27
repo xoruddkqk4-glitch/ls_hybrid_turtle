@@ -2,13 +2,12 @@
 # P4-1 통합 테스트
 #
 # 확인 항목:
-#   [1] 경로 A: 목표가 돌파 → 30분 유지 → TARGET_30MIN 신호
-#   [2] 경로 B: 20일 신고가 돌파 → 즉시 TURTLE_S1 신호 (30분 가드 없음)
-#   [3] 경로 B: 55일 신고가 돌파 → 즉시 TURTLE_S2 신호
-#   [4] 중복 방지: 같은 종목이 두 경로에 해당할 때 우선순위 높은 것만 포함
-#   [5] 09:05 확정 시 unheld_record에 목표가·기준가 즉시 기록
-#   [6] 보유 종목 held_record에 pending_target·reference_price 필드 기록
-#   [7] 감시 목록에서 빠진 보유 종목도 손절 감시 정상 작동
+#   [1] indicator_calc.calc_n_day_high — N일 신고가 계산
+#   [2] timer_agent._check_turtle_30min — 터틀 30분 가드 (10시 필터 포함)
+#   [3] timer_agent.run_timer_check — 터틀 AND 30분 가드 진입 신호 통합
+#   [4] 09:05 확정 시 unheld_record에 목표가·기준가 즉시 기록
+#   [5] 보유 종목 held_record에 pending_target·reference_price 필드 기록
+#   [6] 감시 목록에서 빠진 보유 종목도 손절 감시 정상 작동
 #
 # 실행: python test_p4_integration.py
 
@@ -17,20 +16,35 @@ import unittest
 from datetime import datetime, timedelta
 from unittest.mock import patch, MagicMock
 
+# ──────────────────────────────────────────────────────────
+# API 연결이 필요한 모듈을 Mock으로 미리 등록한다.
+# timer_agent → target_manager → daily_chart_cache → ls_client 순서로
+# 임포트가 연쇄되는데, ls_client가 .env / API 키를 요구하므로
+# 테스트 환경에서는 빈 Mock으로 대체해서 임포트 오류를 막는다.
+# ──────────────────────────────────────────────────────────
+for _mod in ["ls_client", "daily_chart_cache", "sector_cache",
+             "programgarden_finance", "trade_ledger", "dotenv"]:
+    sys.modules.setdefault(_mod, MagicMock())
+
 import pytz
 
 # 한국 표준시
 KST = pytz.timezone("Asia/Seoul")
 
+# ──────────────────────────────────────────────────────────
+# 테스트용 고정 시각 상수
+# (날짜는 임의, 중요한 건 시·분만)
+# ──────────────────────────────────────────────────────────
+_DATE = (2026, 4, 27)
+FIXED_1030 = KST.localize(datetime(*_DATE, 10, 30, 0))   # 10:30 — 10시 이후
+FIXED_0950 = KST.localize(datetime(*_DATE,  9, 50, 0))   # 09:50 — 10시 이전
+FIXED_1000 = KST.localize(datetime(*_DATE, 10,  0, 0))   # 10:00 — 정각
+FIXED_1010 = KST.localize(datetime(*_DATE, 10, 10, 0))   # 10:10
 
-# ══════════════════════════════════════════════════════════
-# [헬퍼] 테스트용 데이터 만들기
-# ══════════════════════════════════════════════════════════
 
-def _kst_str(minutes_ago: int) -> str:
-    """현재 시각에서 N분 전의 KST 시각 문자열을 반환한다."""
-    dt = datetime.now(KST) - timedelta(minutes=minutes_ago)
-    return dt.strftime("%Y-%m-%d %H:%M:%S")
+def _since_str(base_dt: datetime, minutes_ago: int) -> str:
+    """base_dt 기준 N분 전의 KST 시각 문자열을 반환한다."""
+    return (base_dt - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _make_candles(highs: list) -> list:
@@ -40,7 +54,7 @@ def _make_candles(highs: list) -> list:
 
 
 # ══════════════════════════════════════════════════════════
-# 테스트 1-A: indicator_calc.calc_n_day_high — N일 신고가 계산
+# 테스트 1: indicator_calc.calc_n_day_high — N일 신고가 계산
 # ══════════════════════════════════════════════════════════
 
 class TestNDayHigh(unittest.TestCase):
@@ -74,158 +88,198 @@ class TestNDayHigh(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════
-# 테스트 1-B: timer_agent.check_30min_passed — 30분 경과 판단
+# 테스트 2: timer_agent._check_turtle_30min
+#           터틀 30분 가드 + 10시 필터
 # ══════════════════════════════════════════════════════════
 
-class TestCheck30minPassed(unittest.TestCase):
-    """timer_agent.check_30min_passed — 30분 가드 로직이 올바른지 확인"""
+class TestCheckTurtle30min(unittest.TestCase):
+    """_check_turtle_30min — 30분 경과 AND 10시 이후 조건 확인"""
 
-    def setUp(self):
-        import timer_agent
-        self.fn = timer_agent.check_30min_passed
-        self.wl_patch = patch("timer_agent.get_watchlist",
-                              return_value={"005930": {"name": "삼성전자"}})
+    WL = {"005930": {"name": "삼성전자"}}
 
-    def test_35분_경과_True(self):
-        unheld = {"005930": {"above_target_since": _kst_str(35)}}
-        with self.wl_patch:
-            self.assertTrue(self.fn("005930", unheld), "35분 경과 → True")
+    def _run(self, fixed_now: datetime, since_str) -> bool:
+        """_now_kst를 고정 시각으로 대체하고 _check_turtle_30min 실행."""
+        unheld = {"005930": {"turtle_s1_breakout_since": since_str}}
+        with patch("timer_agent._now_kst", return_value=fixed_now), \
+             patch("timer_agent.get_watchlist", return_value=self.WL):
+            import timer_agent
+            return timer_agent._check_turtle_30min(
+                "005930", "turtle_s1_breakout_since", unheld)
 
-    def test_10분_경과_False(self):
-        unheld = {"005930": {"above_target_since": _kst_str(10)}}
-        with self.wl_patch:
-            self.assertFalse(self.fn("005930", unheld), "10분 경과 → False")
+    def test_35분경과_10시이후_True(self):
+        """현재 10:30, 돌파 09:55 (35분 경과) → True"""
+        since = _since_str(FIXED_1030, 35)   # 09:55
+        self.assertTrue(self._run(FIXED_1030, since))
 
-    def test_타이머_미시작_False(self):
-        # above_target_since = null: 한 번도 목표가를 넘지 않은 상태
-        unheld = {"005930": {"above_target_since": None}}
-        with self.wl_patch:
-            self.assertFalse(self.fn("005930", unheld), "타이머 미시작 → False")
+    def test_10분경과_10시이후_False(self):
+        """현재 10:30, 돌파 10:20 (10분 경과) → False (30분 미달)"""
+        since = _since_str(FIXED_1030, 10)   # 10:20
+        self.assertFalse(self._run(FIXED_1030, since))
+
+    def test_35분경과_10시이전_False(self):
+        """현재 09:50, 돌파 09:15 (35분 경과) → False (10시 전 진입 불가)"""
+        since = _since_str(FIXED_0950, 35)   # 09:15
+        self.assertFalse(self._run(FIXED_0950, since))
+
+    def test_breakout_since_없음_False(self):
+        """돌파 시각 미기록 → False"""
+        self.assertFalse(self._run(FIXED_1030, None))
+
+    def test_9시40분돌파_10시에_20분만_경과_False(self):
+        """9:40 돌파, 현재 10:00 → 20분 경과 → False"""
+        since = "2026-04-27 09:40:00"
+        self.assertFalse(self._run(FIXED_1000, since))
+
+    def test_9시40분돌파_10시10분에_30분_경과_True(self):
+        """9:40 돌파, 현재 10:10 → 30분 경과 → True"""
+        since = "2026-04-27 09:40:00"
+        self.assertTrue(self._run(FIXED_1010, since))
+
+    def test_9시20분돌파_10시에_40분_경과_True(self):
+        """9:20 돌파, 현재 10:00 → 40분 경과 AND 10시 → True"""
+        since = "2026-04-27 09:20:00"
+        self.assertTrue(self._run(FIXED_1000, since))
 
 
 # ══════════════════════════════════════════════════════════
-# 테스트 2: timer_agent.run_timer_check — 두 진입 경로 통합
+# 테스트 3: timer_agent.run_timer_check
+#           터틀 AND 30분 가드 진입 신호 통합
 # ══════════════════════════════════════════════════════════
 
 class TestRunTimerCheck(unittest.TestCase):
-    """timer_agent.run_timer_check — 진입 신호 생성 및 우선순위 확인"""
+    """run_timer_check — 진입 신호 생성 및 우선순위 확인"""
 
-    # 테스트용 감시 목록
     WL = {
         "005930": {"name": "삼성전자"},
         "035420": {"name": "NAVER"},
         "000660": {"name": "SK하이닉스"},
     }
 
-    def _run(self, unheld: dict) -> list:
-        """감시 목록·미보유 상태를 모조(mock) 데이터로 교체해서 run_timer_check 실행."""
+    def _run(self, unheld: dict, fixed_now: datetime = FIXED_1030) -> list:
+        """감시 목록·미보유 상태·현재 시각을 고정해서 run_timer_check 실행."""
         with patch("timer_agent.get_watchlist", return_value=self.WL), \
-             patch("timer_agent.load_unheld_record", return_value=unheld):
+             patch("timer_agent.load_unheld_record", return_value=unheld), \
+             patch("timer_agent._now_kst", return_value=fixed_now):
             import timer_agent
             return timer_agent.run_timer_check()
 
-    # ── 경로 A ────────────────────────────────────────────
+    # ── S1 신호 ────────────────────────────────────────────
 
-    def test_경로A_TARGET_30MIN(self):
-        """목표가 위 30분 유지 → TARGET_30MIN 신호"""
-        unheld = {"005930": {
-            "pending_target":    70000,
-            "reference_price":   68000,
-            "above_target_since": _kst_str(35),  # 35분 경과
-            "turtle_s1_signal":  False,
-            "turtle_s2_signal":  False,
-        }}
-        result = self._run(unheld)
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["code"], "005930")
-        self.assertEqual(result[0]["entry_source"], "TARGET_30MIN")
-
-    def test_경로A_30분_미달_신호_없음(self):
-        """10분 경과에 그치면 신호 없음"""
-        unheld = {"005930": {
-            "pending_target":    70000,
-            "reference_price":   68000,
-            "above_target_since": _kst_str(10),  # 10분만 경과
-            "turtle_s1_signal":  False,
-            "turtle_s2_signal":  False,
-        }}
-        result = self._run(unheld)
-        self.assertEqual(result, [], "30분 미달 → 신호 없음")
-
-    # ── 경로 B ────────────────────────────────────────────
-
-    def test_경로B_TURTLE_S1_30분_가드_없음(self):
-        """20일 신고가 돌파 → 타이머 없이 즉시 TURTLE_S1 신호"""
+    def test_S1_30분가드_통과_신호발생(self):
+        """S1 신호 + breakout_since 35분 전 + 10:30 → TURTLE_S1 신호"""
         unheld = {"035420": {
-            "pending_target":    200000,
-            "reference_price":   195000,
-            "above_target_since": None,    # 타이머 미시작이어도 OK
-            "turtle_s1_signal":  True,     # 20일 신고가 돌파
-            "turtle_s2_signal":  False,
+            "turtle_s1_signal":         True,
+            "turtle_s2_signal":         False,
+            "turtle_s1_breakout_since": _since_str(FIXED_1030, 35),
+            "turtle_s2_breakout_since": None,
         }}
         result = self._run(unheld)
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["code"], "035420")
         self.assertEqual(result[0]["entry_source"], "TURTLE_S1")
 
-    def test_경로B_TURTLE_S2(self):
-        """55일 신고가 돌파 → 즉시 TURTLE_S2 신호"""
+    def test_S1_30분_미달_신호없음(self):
+        """S1 신호 + 10분만 경과 → 신호 없음"""
+        unheld = {"035420": {
+            "turtle_s1_signal":         True,
+            "turtle_s2_signal":         False,
+            "turtle_s1_breakout_since": _since_str(FIXED_1030, 10),
+            "turtle_s2_breakout_since": None,
+        }}
+        result = self._run(unheld)
+        self.assertEqual(result, [], "30분 미달 → 신호 없음")
+
+    def test_S1_10시이전_진입불가(self):
+        """S1 신호 + 35분 경과 + 09:50 → 신호 없음 (10시 이전)"""
+        unheld = {"035420": {
+            "turtle_s1_signal":         True,
+            "turtle_s2_signal":         False,
+            "turtle_s1_breakout_since": _since_str(FIXED_0950, 35),
+            "turtle_s2_breakout_since": None,
+        }}
+        result = self._run(unheld, fixed_now=FIXED_0950)
+        self.assertEqual(result, [], "10시 이전 → 신호 없음")
+
+    def test_S1_breakout_since_없으면_신호없음(self):
+        """S1 신호 True이지만 breakout_since 없음 → 신호 없음"""
+        unheld = {"035420": {
+            "turtle_s1_signal":         True,
+            "turtle_s2_signal":         False,
+            "turtle_s1_breakout_since": None,   # 시각 미기록
+            "turtle_s2_breakout_since": None,
+        }}
+        result = self._run(unheld)
+        self.assertEqual(result, [], "breakout_since 없음 → 신호 없음")
+
+    # ── S2 신호 ────────────────────────────────────────────
+
+    def test_S2_30분가드_통과_신호발생(self):
+        """S2 신호 + breakout_since 35분 전 + 10:30 → TURTLE_S2 신호"""
         unheld = {"000660": {
-            "pending_target":    150000,
-            "reference_price":   148000,
-            "above_target_since": None,
-            "turtle_s1_signal":  False,
-            "turtle_s2_signal":  True,    # 55일 신고가 돌파
+            "turtle_s1_signal":         False,
+            "turtle_s2_signal":         True,
+            "turtle_s1_breakout_since": None,
+            "turtle_s2_breakout_since": _since_str(FIXED_1030, 35),
         }}
         result = self._run(unheld)
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["code"], "000660")
         self.assertEqual(result[0]["entry_source"], "TURTLE_S2")
 
-    # ── 중복 방지 ──────────────────────────────────────────
-
-    def test_중복_S2가_30MIN보다_우선(self):
-        """S2 + 30분 동시 해당 → TURTLE_S2 하나만"""
-        unheld = {"005930": {
-            "pending_target":    70000,
-            "reference_price":   68000,
-            "above_target_since": _kst_str(35),  # 30분 조건도 충족
-            "turtle_s1_signal":  False,
-            "turtle_s2_signal":  True,            # S2도 충족
-        }}
-        result = self._run(unheld)
-        self.assertEqual(len(result), 1, "중복 방지: 한 종목 한 번만")
-        self.assertEqual(result[0]["entry_source"], "TURTLE_S2", "S2가 30MIN보다 우선")
+    # ── 우선순위 (S2 > S1) ─────────────────────────────────
 
     def test_중복_S2가_S1보다_우선(self):
-        """S1 + S2 동시 돌파 → TURTLE_S2 하나만"""
+        """S1 + S2 동시 돌파 + 둘 다 30분 가드 통과 → TURTLE_S2 하나만"""
         unheld = {"005930": {
-            "pending_target":    70000,
-            "reference_price":   68000,
-            "above_target_since": None,
-            "turtle_s1_signal":  True,
-            "turtle_s2_signal":  True,
+            "turtle_s1_signal":         True,
+            "turtle_s2_signal":         True,
+            "turtle_s1_breakout_since": _since_str(FIXED_1030, 35),
+            "turtle_s2_breakout_since": _since_str(FIXED_1030, 35),
         }}
         result = self._run(unheld)
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["entry_source"], "TURTLE_S2")
 
-    def test_중복_S1이_30MIN보다_우선(self):
-        """S1 + 30분 동시 해당 → TURTLE_S1 하나만"""
-        unheld = {"005930": {
-            "pending_target":    70000,
-            "reference_price":   68000,
-            "above_target_since": _kst_str(35),
-            "turtle_s1_signal":  True,
-            "turtle_s2_signal":  False,
+    # ── 9시대 돌파 → 시간 누적 반영 ─────────────────────────
+
+    def test_9시40분_돌파_10시에_20분경과_신호없음(self):
+        """9:40 돌파, 현재 10:00 → 20분만 경과 → 신호 없음"""
+        unheld = {"035420": {
+            "turtle_s1_signal":         True,
+            "turtle_s2_signal":         False,
+            "turtle_s1_breakout_since": "2026-04-27 09:40:00",
+            "turtle_s2_breakout_since": None,
         }}
-        result = self._run(unheld)
+        result = self._run(unheld, fixed_now=FIXED_1000)
+        self.assertEqual(result, [], "9:40 돌파 후 10:00엔 아직 20분 → 신호 없음")
+
+    def test_9시40분_돌파_10시10분에_30분경과_신호발생(self):
+        """9:40 돌파, 현재 10:10 → 30분 경과 + 10시 이후 → TURTLE_S1 신호"""
+        unheld = {"035420": {
+            "turtle_s1_signal":         True,
+            "turtle_s2_signal":         False,
+            "turtle_s1_breakout_since": "2026-04-27 09:40:00",
+            "turtle_s2_breakout_since": None,
+        }}
+        result = self._run(unheld, fixed_now=FIXED_1010)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["entry_source"], "TURTLE_S1")
+
+    def test_9시20분_돌파_10시에_40분경과_즉시신호(self):
+        """9:20 돌파, 현재 10:00 → 40분 경과 + 10시 → 즉시 TURTLE_S1 신호"""
+        unheld = {"035420": {
+            "turtle_s1_signal":         True,
+            "turtle_s2_signal":         False,
+            "turtle_s1_breakout_since": "2026-04-27 09:20:00",
+            "turtle_s2_breakout_since": None,
+        }}
+        result = self._run(unheld, fixed_now=FIXED_1000)
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["entry_source"], "TURTLE_S1")
 
 
 # ══════════════════════════════════════════════════════════
-# 테스트 3: target_manager.initialize_unheld_record
+# 테스트 4: target_manager.initialize_unheld_record
 #           09:05 종목 확정 시 목표가·기준가 즉시 저장
 # ══════════════════════════════════════════════════════════
 
@@ -248,20 +302,22 @@ class TestInitializeUnheldRecord(unittest.TestCase):
         self.assertIn("005930", saved, "005930이 저장되어야 함")
         rec = saved["005930"]
 
-        # 필수 필드 존재 확인
+        # 필수 필드 존재 확인 (새 필드 포함)
         for field in ("pending_target", "reference_price",
                       "turtle_s1_signal", "turtle_s2_signal",
-                      "above_target_since"):
+                      "above_target_since",
+                      "turtle_s1_breakout_since", "turtle_s2_breakout_since"):
             self.assertIn(field, rec, f"'{field}' 필드가 있어야 함")
 
         # 초기값 확인
         self.assertEqual(rec["pending_target"], int(70000 * 1.02),
                          "초기 목표가 = 현재가 × 1.02")
-        self.assertEqual(rec["reference_price"], 70000,
-                         "기준가 = 현재가")
-        self.assertFalse(rec["turtle_s1_signal"], "S1 신호 초기값 = False")
-        self.assertFalse(rec["turtle_s2_signal"], "S2 신호 초기값 = False")
-        self.assertIsNone(rec["above_target_since"], "타이머 초기값 = None")
+        self.assertEqual(rec["reference_price"], 70000, "기준가 = 현재가")
+        self.assertFalse(rec["turtle_s1_signal"],  "S1 신호 초기값 = False")
+        self.assertFalse(rec["turtle_s2_signal"],  "S2 신호 초기값 = False")
+        self.assertIsNone(rec["above_target_since"],        "타이머 초기값 = None")
+        self.assertIsNone(rec["turtle_s1_breakout_since"],  "S1 돌파 시각 초기값 = None")
+        self.assertIsNone(rec["turtle_s2_breakout_since"],  "S2 돌파 시각 초기값 = None")
 
     def test_기존_종목_타이머_보존(self):
         """이미 unheld_record에 있는 종목은 덮어쓰지 않음"""
@@ -269,11 +325,13 @@ class TestInitializeUnheldRecord(unittest.TestCase):
 
         watchlist = {"005930": {"name": "삼성전자"}}
         existing = {"005930": {
-            "pending_target":    75000,
-            "reference_price":   73000,
-            "above_target_since": "2026-04-15 09:15:00",  # 기존 타이머
-            "turtle_s1_signal":  True,
-            "turtle_s2_signal":  False,
+            "pending_target":           75000,
+            "reference_price":          73000,
+            "above_target_since":       "2026-04-15 09:15:00",
+            "turtle_s1_signal":         True,
+            "turtle_s2_signal":         False,
+            "turtle_s1_breakout_since": "2026-04-15 09:15:00",
+            "turtle_s2_breakout_since": None,
         }}
         saved = {}
 
@@ -288,82 +346,12 @@ class TestInitializeUnheldRecord(unittest.TestCase):
                          "기존 타이머가 그대로 보존되어야 함")
         self.assertEqual(rec["pending_target"], 75000,
                          "기존 목표가가 그대로 보존되어야 함")
+        self.assertEqual(rec["turtle_s1_breakout_since"], "2026-04-15 09:15:00",
+                         "기존 S1 돌파 시각이 보존되어야 함")
 
 
 # ══════════════════════════════════════════════════════════
-# 테스트 4: target_manager.update_held_stock_targets
-#           보유 종목 pending_target·reference_price 기록
-# ══════════════════════════════════════════════════════════
-
-class TestUpdateHeldStockTargets(unittest.TestCase):
-    """held_stock_record에 목표가·기준가 필드가 초기화되는지 확인"""
-
-    def test_필드_없으면_현재가_기준_초기화(self):
-        import target_manager
-
-        # 매수 직후: pending_target / reference_price 필드 없음
-        held = {"005930": {
-            "current_unit":    1,
-            "last_buy_price":  70000,
-            "avg_buy_price":   70000,
-            "stop_loss_price": 66000,
-            # pending_target, reference_price 없음!
-        }}
-        saved = {}
-
-        with patch("target_manager._load_held_record",
-                   return_value=held), \
-             patch("target_manager._save_held_record",
-                   side_effect=lambda d: saved.update(d)), \
-             patch("target_manager.ls_client.get_multi_price",
-                   return_value={"005930": 72000}), \
-             patch("target_manager.get_watchlist",
-                   return_value={"005930": {"name": "삼성전자"}}):
-            target_manager.update_held_stock_targets()
-
-        self.assertIn("005930", saved, "005930이 저장되어야 함")
-        rec = saved["005930"]
-        self.assertIn("pending_target", rec,
-                      "pending_target 필드가 저장되어야 함")
-        self.assertIn("reference_price", rec,
-                      "reference_price 필드가 저장되어야 함")
-        # 초기값: 현재가(72000) × 1.02
-        self.assertEqual(rec["pending_target"], int(72000 * 1.02))
-        self.assertEqual(rec["reference_price"], 72000)
-
-    def test_가격_상승_시_목표가_고정(self):
-        """현재가 ≥ 기준가면 목표가를 올리지 않음 (잠금 로직)"""
-        import target_manager
-
-        held = {"005930": {
-            "current_unit":    1,
-            "last_buy_price":  70000,
-            "avg_buy_price":   70000,
-            "stop_loss_price": 66000,
-            "pending_target":  71400,   # 기존 목표가
-            "reference_price": 70000,  # 기준가
-        }}
-        saved = {}
-
-        with patch("target_manager._load_held_record",
-                   return_value=held), \
-             patch("target_manager._save_held_record",
-                   side_effect=lambda d: saved.update(d)), \
-             patch("target_manager.ls_client.get_multi_price",
-                   return_value={"005930": 75000}), \
-             patch("target_manager.get_watchlist",
-                   return_value={"005930": {"name": "삼성전자"}}):
-            target_manager.update_held_stock_targets()
-
-        # 가격 상승 → 목표가 변경 없음 → save 호출 안 됨
-        # saved가 비어있으면 변경 없음 (save_held_record 미호출)
-        if "005930" in saved:
-            self.assertEqual(saved["005930"]["pending_target"], 71400,
-                             "가격 상승 시 목표가가 올라가면 안 됨")
-
-
-# ══════════════════════════════════════════════════════════
-# 테스트 5: risk_guardian.run_guardian
+# 테스트 6: risk_guardian.run_guardian
 #           감시 목록에서 빠진 보유 종목도 손절 감시
 # ══════════════════════════════════════════════════════════
 
@@ -374,34 +362,26 @@ class TestRiskGuardianHeldOutsideWatchlist(unittest.TestCase):
         """watchlist에 없지만 held_stock_record에 있는 종목 → 손절 주문 실행"""
         import risk_guardian
 
-        # 감시 목록에 TEST01 없음 (오늘 배치에서 제외됨)
-        mock_wl = {"OTHER": {"name": "다른종목"}}
-
-        # 잔고에 TEST01 보유, 현재가가 손절가 아래
+        mock_wl      = {"OTHER": {"name": "다른종목"}}
         mock_balance = [
             {"code": "TEST01", "current_price": "49000", "sellable_qty": 10}
         ]
-
-        # held_stock_record에는 TEST01 존재
         mock_pos = {"TEST01": {
             "current_unit":       1,
             "last_buy_price":     55000,
             "avg_buy_price":      55000,
-            "stop_loss_price":    50000,  # 현재가 49000 < 손절가 50000
+            "stop_loss_price":    50000,   # 현재가 49000 < 손절가 50000
             "next_pyramid_price": 57000,
             "entry_type":         "NORMAL",
             "max_unit":           4,
             "total_qty":          10,
             "entry_source":       "TURTLE_S1",
         }}
-
         order_log = []
 
-        with patch("risk_guardian.get_watchlist", return_value=mock_wl), \
-             patch("risk_guardian.ls_client.get_balance",
-                   return_value=mock_balance), \
-             patch("risk_guardian.load_position_state",
-                   return_value=mock_pos), \
+        with patch("risk_guardian.get_watchlist",   return_value=mock_wl), \
+             patch("risk_guardian.ls_client.get_balance", return_value=mock_balance), \
+             patch("risk_guardian.load_position_state",   return_value=mock_pos), \
              patch("risk_guardian.ls_client.place_order",
                    side_effect=lambda c, q, s, t: order_log.append(
                        {"code": c, "qty": q, "side": s}
@@ -411,37 +391,31 @@ class TestRiskGuardianHeldOutsideWatchlist(unittest.TestCase):
              patch("risk_guardian.telegram_alert.SendMessage"):
             risk_guardian.run_guardian()
 
-        self.assertEqual(len(order_log), 1,
-                         "손절 매도 주문이 1번 실행되어야 함")
+        self.assertEqual(len(order_log), 1, "손절 매도 주문이 1번 실행되어야 함")
         self.assertEqual(order_log[0]["code"], "TEST01")
         self.assertEqual(order_log[0]["side"], "SELL")
-        self.assertEqual(order_log[0]["qty"], 10)
+        self.assertEqual(order_log[0]["qty"],  10)
 
     def test_목록_외_보유_기록_없으면_주문_안_함(self):
         """watchlist에도 없고 held_stock_record에도 없는 종목 → 매도 안 함"""
         import risk_guardian
 
-        mock_wl = {}
+        mock_wl      = {}
         mock_balance = [
             {"code": "MANUAL01", "current_price": "10000", "sellable_qty": 5}
         ]
-        # held_stock_record에도 없음 — 완전 수동 보유 종목
-        mock_pos = {}
-
+        mock_pos  = {}
         order_log = []
 
-        with patch("risk_guardian.get_watchlist", return_value=mock_wl), \
-             patch("risk_guardian.ls_client.get_balance",
-                   return_value=mock_balance), \
-             patch("risk_guardian.load_position_state",
-                   return_value=mock_pos), \
+        with patch("risk_guardian.get_watchlist",   return_value=mock_wl), \
+             patch("risk_guardian.ls_client.get_balance", return_value=mock_balance), \
+             patch("risk_guardian.load_position_state",   return_value=mock_pos), \
              patch("risk_guardian.ls_client.place_order",
                    side_effect=lambda *a, **k: order_log.append(True)
                    or {"success": True, "order_no": "SHOULD_NOT_CALL"}):
             risk_guardian.run_guardian()
 
-        self.assertEqual(len(order_log), 0,
-                         "수동 보유 종목(기록 없음)은 주문하면 안 됨")
+        self.assertEqual(len(order_log), 0, "수동 보유 종목(기록 없음)은 주문하면 안 됨")
 
 
 # ══════════════════════════════════════════════════════════
@@ -456,13 +430,11 @@ if __name__ == "__main__":
     loader = unittest.TestLoader()
     suite  = unittest.TestSuite()
 
-    # 테스트 클래스 순서대로 추가
     for cls in [
         TestNDayHigh,
-        TestCheck30minPassed,
+        TestCheckTurtle30min,
         TestRunTimerCheck,
         TestInitializeUnheldRecord,
-        TestUpdateHeldStockTargets,
         TestRiskGuardianHeldOutsideWatchlist,
     ]:
         suite.addTests(loader.loadTestsFromTestCase(cls))

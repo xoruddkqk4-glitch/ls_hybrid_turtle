@@ -247,7 +247,7 @@ def check_pyramid_trigger(code: str, current_price: int, pos: dict, atr_n: float
 def place_entry_order(
     code: str, qty: int, price: int, atr_n: float,
     entry_type: str, max_unit: int,
-    entry_source: str = "TARGET_30MIN"
+    entry_source: str = "TURTLE_S1"
 ):
     """1차 진입 주문을 실행하고 포지션 상태를 기록한다.
 
@@ -261,7 +261,7 @@ def place_entry_order(
     저장되는 포지션 상태:
       - stop_loss_price    = price - 2 × atr_n  (손절가)
       - next_pyramid_price = price + 0.5 × atr_n (다음 피라미딩 기준가)
-      - entry_source       = 진입 경로 ("TARGET_30MIN" / "TURTLE_S1" / "TURTLE_S2")
+      - entry_source       = 진입 경로 ("TURTLE_S1" / "TURTLE_S2")
 
     Args:
         code:         종목코드 6자리
@@ -270,7 +270,7 @@ def place_entry_order(
         atr_n:        ATR(N) 값
         entry_type:   "NORMAL" 또는 "EXCEPTION"
         max_unit:     최대 Unit 횟수 (4 또는 2)
-        entry_source: 진입 경로 ("TARGET_30MIN" / "TURTLE_S1" / "TURTLE_S2")
+        entry_source: 진입 경로 ("TURTLE_S1" / "TURTLE_S2")
     """
     # ① 안전장치: 감시 종목이 아니면 절대 주문하지 않음
     watchlist = get_watchlist()
@@ -312,18 +312,17 @@ def place_entry_order(
         "entry_type":         entry_type,
         "max_unit":           max_unit,
         "total_qty":          qty,            # 피라미딩 시 평균가 계산에 사용
-        "entry_source":       entry_source,   # 진입 경로 (TARGET_30MIN / TURTLE_S1 / TURTLE_S2)
+        "entry_source":       entry_source,   # 진입 경로 (TURTLE_S1 / TURTLE_S2)
     }
     save_position_state(position_state)
 
     # ④ 체결 원장 기록
     # 진입 경로(entry_source)에 따라 매매구분(source) 세분화
     source_map = {
-        "TARGET_30MIN": "ENTRY_30MIN",   # 목표가 30분 가드 진입
-        "TURTLE_S1":    "ENTRY_S1",      # 20일 신고가 돌파 진입
-        "TURTLE_S2":    "ENTRY_S2",      # 55일 신고가 돌파 진입
+        "TURTLE_S1": "ENTRY_S1",   # 20일 신고가 돌파 + 30분 가드 진입
+        "TURTLE_S2": "ENTRY_S2",   # 55일 신고가 돌파 + 30분 가드 진입
     }
-    ledger_source = source_map.get(entry_source, "ENTRY_30MIN")
+    ledger_source = source_map.get(entry_source, "ENTRY_S1")
 
     trade_ledger.append_trade({
         "side":        "BUY",
@@ -340,9 +339,8 @@ def place_entry_order(
 
     # ⑤ 텔레그램 알림
     source_label = {
-        "TURTLE_S2":   "터틀S2(55일신고가)",
-        "TURTLE_S1":   "터틀S1(20일신고가)",
-        "TARGET_30MIN": "목표가30분",
+        "TURTLE_S2": "터틀S2(55일신고가)",
+        "TURTLE_S1": "터틀S1(20일신고가)",
     }.get(entry_source, entry_source)
     telegram_alert.SendMessage(
         f"✅ 터틀 진입\n"

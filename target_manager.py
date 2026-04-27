@@ -130,12 +130,14 @@ def initialize_unheld_record(watchlist: dict):
             name        = watchlist.get(code, {}).get("name", code)
 
             unheld_record[code] = {
-                "pending_target":     init_target,
-                "reference_price":    current_price,
-                "above_target_since": None,
-                "turtle_s1_signal":   False,
-                "turtle_s2_signal":   False,
-                "last_updated":       now_str,
+                "pending_target":           init_target,
+                "reference_price":          current_price,
+                "above_target_since":       None,
+                "turtle_s1_signal":         False,
+                "turtle_s2_signal":         False,
+                "turtle_s1_breakout_since": None,   # S1(20일 신고가) 돌파 발생 시각
+                "turtle_s2_breakout_since": None,   # S2(55일 신고가) 돌파 발생 시각
+                "last_updated":             now_str,
             }
             print(f"[target_manager] {name}({code}) 초기화 — "
                   f"현재가: {current_price:,}원 / 초기 목표가: {init_target:,}원")
@@ -341,14 +343,18 @@ def run_update(held_codes: Optional[Set[str]] = None):
             # ──────────────────────────────────────────────────────────────
             if code not in unheld_record:
                 # 처음 등록
-                new_target = calc_pending_target(code, current_price, indicators)
+                new_target  = calc_pending_target(code, current_price, indicators)
+                now_kst_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
                 unheld_record[code] = {
-                    "pending_target":     new_target,
-                    "reference_price":    current_price,
-                    "above_target_since": None,
-                    "turtle_s1_signal":   turtle_s1,
-                    "turtle_s2_signal":   turtle_s2,
-                    "last_updated":       None,
+                    "pending_target":           new_target,
+                    "reference_price":          current_price,
+                    "above_target_since":       None,
+                    "turtle_s1_signal":         turtle_s1,
+                    "turtle_s2_signal":         turtle_s2,
+                    # 처음 등록 시점에 이미 신호가 True이면 지금 시각을 돌파 시각으로 기록
+                    "turtle_s1_breakout_since": now_kst_str if turtle_s1 else None,
+                    "turtle_s2_breakout_since": now_kst_str if turtle_s2 else None,
+                    "last_updated":             None,
                 }
             else:
                 reference_price = unheld_record[code].get("reference_price", 0)
@@ -371,13 +377,30 @@ def run_update(held_codes: Optional[Set[str]] = None):
                           f"목표가: {old_target:,}원 → {new_target:,}원 → 타이머 초기화")
                 # 현재가 ≥ 기준가: 목표가 유지
 
-                # 터틀 신호 업데이트
-                unheld_record[code]["turtle_s1_signal"] = turtle_s1
-                unheld_record[code]["turtle_s2_signal"] = turtle_s2
+                now_kst_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
 
-                # 구버전 호환: turtle 신호 필드가 없는 레코드에 추가
-                unheld_record[code].setdefault("turtle_s1_signal", turtle_s1)
-                unheld_record[code].setdefault("turtle_s2_signal", turtle_s2)
+                # 구버전 호환: breakout_since 필드가 없는 JSON 대비 None으로 초기화
+                unheld_record[code].setdefault("turtle_s1_breakout_since", None)
+                unheld_record[code].setdefault("turtle_s2_breakout_since", None)
+
+                # S1 신호 업데이트 + 돌파 시각 관리
+                unheld_record[code]["turtle_s1_signal"] = turtle_s1
+                if turtle_s1:
+                    # 신호 True인데 시각이 없으면 지금 시각 기록 (처음 돌파 또는 구버전 호환)
+                    if unheld_record[code]["turtle_s1_breakout_since"] is None:
+                        unheld_record[code]["turtle_s1_breakout_since"] = now_kst_str
+                    # 이미 시각이 있으면 그대로 유지 (타이머 계속)
+                else:
+                    # 신호 사라지면 시각 초기화
+                    unheld_record[code]["turtle_s1_breakout_since"] = None
+
+                # S2 신호 업데이트 + 돌파 시각 관리 (S1과 동일 구조)
+                unheld_record[code]["turtle_s2_signal"] = turtle_s2
+                if turtle_s2:
+                    if unheld_record[code]["turtle_s2_breakout_since"] is None:
+                        unheld_record[code]["turtle_s2_breakout_since"] = now_kst_str
+                else:
+                    unheld_record[code]["turtle_s2_breakout_since"] = None
 
             # 30분 가드 타이머 상태 업데이트
             unheld_record[code] = update_above_target_time(
