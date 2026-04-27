@@ -117,10 +117,13 @@ def get_sector_units(state: dict, sector: str) -> int:
 
 
 # 포트폴리오 전체 유닛 상한
-MAX_TOTAL_UNITS = 15
+MAX_TOTAL_UNITS = 12
 
 # 업종별 유닛 상한
 MAX_SECTOR_UNITS = 6
+
+# 1 Unit당 최대 매수금액 비율 (총자본 × 이 값)
+MAX_UNIT_PURCHASE_RATIO = 0.1
 
 
 # ─────────────────────────────────────────
@@ -131,14 +134,14 @@ def calc_unit_size(code: str, price: int, atr_n: float, total_capital: int):
     """리스크 기반 Unit 수량을 계산한다.
 
     터틀 트레이딩의 핵심 공식:
-    1 Unit 수량 = (총 자본 × 2%) / (ATR(N) × 1주 가격)
+    1 Unit 수량 = (총 자본 × 리스크팩터) / ATR(N)
 
-    이렇게 하면 어떤 종목을 사더라도, 그 종목이 ATR(N)만큼 떨어질 때
-    총 자본의 딱 2%만 손실 나도록 수량을 맞출 수 있다.
+    1 Unit 매수금이 총자본 × 10% 이하이면 리스크팩터 = 0.02 (기본값).
+    초과하면 리스크팩터를 낮춰서 매수금을 상한에 맞춘다.
+    종목마다 리스크팩터가 달라지며, held_stock_record.json에 저장된다.
 
-    예외 진입 규칙 (1주 가격이 너무 비쌀 때):
-      - 1주 가격이 총자본의 2% 초과 ~ 5% 이하 → 1주만 매수 (max_unit=2로 제한)
-      - 1주 가격이 총자본의 5% 초과 → 아예 스킵
+    예외 진입 (1주 가격이 총자본의 2% 초과):
+      → 1주 매수, max_unit=2, effective_risk_factor=None
 
     Args:
         code:          종목코드 6자리 (로그 출력용)
@@ -147,20 +150,15 @@ def calc_unit_size(code: str, price: int, atr_n: float, total_capital: int):
         total_capital: 총 자본 (원)
 
     Returns:
-        (수량, 진입유형, 최대Unit) 튜플 또는 None(스킵)
-        예: (10, "NORMAL", 4) 또는 (1, "EXCEPTION", 2) 또는 None
+        (수량, 진입유형, 최대Unit, 유효리스크팩터) 튜플 또는 None(스킵)
+        예: (200, "NORMAL", 3, 0.004) 또는 (1, "EXCEPTION", 2, None) 또는 None
     """
     name = get_watchlist().get(code, {}).get("name", code)
 
     # 1주 가격이 총자본에서 차지하는 비율
     one_share_ratio = price / total_capital if total_capital > 0 else 1.0
 
-    # 1주 가격이 총자본 5% 초과 → 매수 불가
-    if one_share_ratio > 0.05:
-        print(f"[turtle] {name}({code}) 1주 가격({price:,}원)이 총자본 5% 초과 → 스킵")
-        return None
-
-    # 1주 가격이 총자본 2%~5% → 예외 진입 (1주, 최대 2회 피라미딩)
+    # 1주 가격이 총자본 2% 초과 → 예외 진입 (1주, 최대 2 Unit)
     if one_share_ratio > 0.02:
         allow_exception = (
             os.getenv("LS_ALLOW_EXCEPTION_ENTRY", "True").strip().lower() == "true"
@@ -168,36 +166,39 @@ def calc_unit_size(code: str, price: int, atr_n: float, total_capital: int):
         if not allow_exception:
             print(f"[turtle] {name}({code}) 예외 진입 비활성화(LS_ALLOW_EXCEPTION_ENTRY=False) → 스킵")
             return None
-        print(f"[turtle] {name}({code}) 예외 진입 — 1주 가격({price:,}원)이 "
+        print(f"[turtle] {name}({code}) 예외 진입: 1주 가격({price:,}원)이 "
               f"총자본 {one_share_ratio*100:.1f}% → 1주 매수 (max_unit=2)")
-        return (1, "EXCEPTION", 2)
+        return (1, "EXCEPTION", 2, None)
 
     # 일반 진입: ATR 기반 수량 계산
     if atr_n <= 0:
         print(f"[turtle] {name}({code}) ATR(N)=0 → 수량 계산 불가, 스킵")
         return None
 
-    # 1 Unit = 총자본의 2%를 ATR 1회 변동에 위험에 노출시키는 수량
-    # 공식: (총자본 × 0.02) / N(ATR 원화값)
-    # 검증: qty주 × ATR원 = 총자본 × 2% → qty = 총자본 × 0.02 / ATR
+    # 기본 리스크팩터 0.02로 수량 계산
+    # 공식: qty = (총자본 × 리스크팩터) / ATR
     qty = int((total_capital * 0.02) / atr_n)
     if qty <= 0:
         print(f"[turtle] {name}({code}) 계산된 수량=0 (ATR={atr_n:,.0f}) → 스킵")
         return None
 
-    # 1 Unit 최대 투자금액 상한 적용 (총자본 ÷ 15)
-    # ATR이 작은 종목은 수량이 과도하게 커질 수 있어서 상한으로 조정한다
-    max_unit_amount = total_capital / MAX_TOTAL_UNITS
-    max_qty_by_amount = int(max_unit_amount / price)
-    if max_qty_by_amount <= 0:
-        print(f"[turtle] {name}({code}) 1주 가격({price:,}원)이 Unit 상한({max_unit_amount:,.0f}원) 초과 → 스킵")
-        return None
-    if qty > max_qty_by_amount:
-        print(f"[turtle] {name}({code}) ATR 기반 수량 {qty}주 → Unit 금액 상한으로 {max_qty_by_amount}주로 축소 "
-              f"(상한: {max_unit_amount:,.0f}원 / 매수금: {max_qty_by_amount * price:,.0f}원)")
-        qty = max_qty_by_amount
+    # 1 Unit 최대 매수금액 상한 확인 (총자본 × 10%)
+    max_unit_amount = total_capital * MAX_UNIT_PURCHASE_RATIO
+    purchase_amount = qty * price
 
-    return (qty, "NORMAL", 4)
+    if purchase_amount <= max_unit_amount:
+        # 상한 이내 → 리스크팩터 그대로 0.02
+        effective_risk_factor = 0.02
+    else:
+        # 상한 초과 → 리스크팩터를 줄여서 매수금을 상한에 맞춤
+        # 공식: rf = (상한금액 × ATR) / (총자본 × 현재가)
+        effective_risk_factor = (max_unit_amount * atr_n) / (total_capital * price)
+        qty = int((total_capital * effective_risk_factor) / atr_n)
+        print(f"[turtle] {name}({code}) 매수금 상한 초과 → "
+              f"리스크팩터 0.02 → {effective_risk_factor:.4f}로 조정 "
+              f"({qty}주, 매수금: {qty * price:,.0f}원 / 상한: {max_unit_amount:,.0f}원)")
+
+    return (qty, "NORMAL", 3, effective_risk_factor)
 
 
 # ─────────────────────────────────────────
@@ -247,7 +248,8 @@ def check_pyramid_trigger(code: str, current_price: int, pos: dict, atr_n: float
 def place_entry_order(
     code: str, qty: int, price: int, atr_n: float,
     entry_type: str, max_unit: int,
-    entry_source: str = "TURTLE_S1"
+    entry_source: str = "TURTLE_S1",
+    effective_risk_factor=None
 ):
     """1차 진입 주문을 실행하고 포지션 상태를 기록한다.
 
@@ -303,16 +305,17 @@ def place_entry_order(
 
     position_state = load_position_state()
     position_state[code] = {
-        "stock_name":         name,           # 종목명 저장 — 매도 시 watchlist 날짜 불일치 대비
-        "current_unit":       1,
-        "last_buy_price":     price,
-        "avg_buy_price":      price,          # 1차 진입이므로 평균가 = 진입가
-        "stop_loss_price":    stop_loss_price,
-        "next_pyramid_price": next_pyramid_price,
-        "entry_type":         entry_type,
-        "max_unit":           max_unit,
-        "total_qty":          qty,            # 피라미딩 시 평균가 계산에 사용
-        "entry_source":       entry_source,   # 진입 경로 (TURTLE_S1 / TURTLE_S2)
+        "stock_name":            name,                   # 종목명 저장 — 매도 시 watchlist 날짜 불일치 대비
+        "current_unit":          1,
+        "last_buy_price":        price,
+        "avg_buy_price":         price,                  # 1차 진입이므로 평균가 = 진입가
+        "stop_loss_price":       stop_loss_price,
+        "next_pyramid_price":    next_pyramid_price,
+        "entry_type":            entry_type,
+        "max_unit":              max_unit,
+        "total_qty":             qty,                    # 피라미딩 시 평균가 계산에 사용
+        "entry_source":          entry_source,           # 진입 경로 (TURTLE_S1 / TURTLE_S2)
+        "effective_risk_factor": effective_risk_factor,  # 종목별 유효 리스크팩터 (피라미딩 수량 계산에 재사용)
     }
     save_position_state(position_state)
 
@@ -541,7 +544,7 @@ def run_orders(entry_signals: list):
         if result is None:
             continue
 
-        qty, entry_type, max_unit = result
+        qty, entry_type, max_unit, effective_rf = result
 
         # 포트폴리오 전체·업종별 유닛 한도 확인
         # 직전 진입으로 파일이 갱신됐을 수 있으므로 파일을 다시 읽어서 정확한 합계를 구함
@@ -564,7 +567,7 @@ def run_orders(entry_signals: list):
             continue
 
         # 진입 주문 실행 (진입 경로 전달)
-        place_entry_order(code, qty, current_price, atr_n, entry_type, max_unit, entry_source)
+        place_entry_order(code, qty, current_price, atr_n, entry_type, max_unit, entry_source, effective_rf)
 
     # ─────────────────────────────────────
     # [B] 기존 포지션 피라미딩 처리
@@ -600,12 +603,21 @@ def run_orders(entry_signals: list):
         if not check_pyramid_trigger(code, current_price, pos, atr_n):
             continue
 
-        # 피라미딩용 Unit 수량 계산 (신규 진입과 동일한 방식)
-        result = calc_unit_size(code, current_price, atr_n, total_capital)
-        if result is None:
-            continue
-
-        qty = result[0]  # qty만 사용 (entry_type, max_unit은 기존 pos에서 관리)
+        # 피라미딩 수량: 진입 시 저장한 리스크팩터 재사용 (종목별 고정값)
+        effective_rf = pos.get("effective_risk_factor")
+        if effective_rf is None:
+            entry_type_pos = pos.get("entry_type", "NORMAL")
+            if entry_type_pos == "NORMAL":
+                # 업데이트 전 진입 종목(필드 없음) → 기본값 0.02로 대체
+                effective_rf = 0.02
+            else:
+                # EXCEPTION / MANUAL 진입 종목 → 1주 고정
+                qty = 1
+                effective_rf = None  # qty 계산 건너뜀
+        if effective_rf is not None:
+            qty = int((total_capital * effective_rf) / atr_n)
+            if qty <= 0:
+                continue
 
         # 포트폴리오 전체·업종별 유닛 한도 확인 (피라미딩 직전 재확인)
         fresh_state         = load_position_state()

@@ -148,16 +148,17 @@ def run_balance_sync(actual_list: Optional[list] = None) -> bool:
             # held_stock_record.json에 수동 편입 등록
             # current_unit = max_unit = 1 → check_pyramid_trigger에서 추가 매수 자동 차단
             held[code] = {
-                "stock_name":         name,
-                "current_unit":       1,
-                "last_buy_price":     avg_price,
-                "avg_buy_price":      avg_price,
-                "stop_loss_price":    stop_loss_price,
-                "next_pyramid_price": 0,     # 피라미딩 없음
-                "entry_type":         "MANUAL",
-                "max_unit":           1,     # 추가 매수 상한 = 1 (현재와 같음 → 피라미딩 불가)
-                "total_qty":          qty,
-                "source":             "MANUAL_SYNC",   # 수동 편입 표시
+                "stock_name":            name,
+                "current_unit":          1,
+                "last_buy_price":        avg_price,
+                "avg_buy_price":         avg_price,
+                "stop_loss_price":       stop_loss_price,
+                "next_pyramid_price":    0,      # 피라미딩 없음
+                "entry_type":            "MANUAL",
+                "max_unit":              1,      # 추가 매수 상한 = 1 (현재와 같음 → 피라미딩 불가)
+                "total_qty":             qty,
+                "source":                "MANUAL_SYNC",  # 수동 편입 표시
+                "effective_risk_factor": None,   # 수동 편입은 리스크팩터 없음 (피라미딩 불가)
             }
             changed = True
 

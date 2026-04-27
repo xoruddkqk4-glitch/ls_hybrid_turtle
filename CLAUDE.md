@@ -82,7 +82,7 @@
 | `dynamic_watchlist.json` | 09:05 배치 최종 감시 종목 50개 — 모든 모듈이 이 파일을 참조 |
 | `watchlist_config.json` | 수동 화이트리스트/블랙리스트 (없으면 자동 선정만 사용) |
 | `unheld_stock_record.json` | 미보유 종목의 동적 목표가·터틀 신호(`turtle_s1/s2_signal`)·돌파 시각(`turtle_s1/s2_breakout_since`)·30분 가드 타이머 상태 |
-| `held_stock_record.json` | 보유 종목의 Unit 수·마지막 매수가·손절가·피라미딩 트리거가 |
+| `held_stock_record.json` | 보유 종목의 Unit 수·마지막 매수가·손절가·피라미딩 트리거가·종목별 유효 리스크팩터(`effective_risk_factor`) |
 | `trade_ledger.json` | 체결 원장 전체 기록 |
 | `sector_cache.json` | 종목별 테마 캐시 (t1532 API 결과) |
 | `daily_chart_cache.json` | 일봉(60개)·240분봉(25개) 캐시 — 09:05 market_open 직후 생성 |
@@ -129,10 +129,13 @@ SA-SCREENER 완료 → SA-FOUNDATION 완료 → SA-MODULE-ENTRY · SA-MODULE-TRA
 
 ### 포지션 사이징 및 피라미딩
 - **N(ATR)**: 최근 20일 True Range 평균, 매일 갱신
-- **1 Unit 수량**: `(총 자본 × 0.02) / (N × 1주 가격)`
-  - 1주 가격 > 총 자본 × 0.02 → 매수 스킵 (기본)
-  - 예외: 1주 가격이 총 자본 2%~5% 이내 → 1주 매수, 피라미딩 상한 **2 Unit**
-- **피라미딩**: 마지막 매수가 대비 0.5N 상승 시마다 1 Unit 추가 (기본 상한 **4 Unit**)
+- **1 Unit 수량**: `(총 자본 × effective_risk_factor) / N`
+  - 기본 `effective_risk_factor = 0.02` (총자본의 2% 리스크 노출)
+  - 1 Unit 매수금이 총자본 × 10% 초과 시: `effective_risk_factor`를 자동으로 낮춰 매수금을 상한에 맞춤 → 종목마다 다른 리스크팩터 적용, `held_stock_record.json`에 저장
+  - 예외: 1주 가격이 총 자본 2% 초과 → 1주 매수, 피라미딩 상한 **2 Unit**, `effective_risk_factor = None`
+- **피라미딩**: 마지막 매수가 대비 0.5N 상승 시마다 1 Unit 추가 (기본 상한 **3 Unit**)
+  - 피라미딩 수량은 진입 시 저장한 `effective_risk_factor` 재사용 (종목별 고정)
+- **포트폴리오 상한**: 전체 **12 Unit**, 동일 테마 **6 Unit**
 
 ### 청산 및 손절
 - **하드 손절(2N Stop)**: 최종 체결가 대비 2N 하락 시 전량 즉시 매도
