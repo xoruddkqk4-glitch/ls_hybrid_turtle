@@ -20,6 +20,7 @@
 import json
 import os
 import time
+from typing import Optional
 
 import indicator_calc
 import ls_client
@@ -63,17 +64,23 @@ def _save_held(state: dict):
 # 메인 함수
 # ─────────────────────────────────────────
 
-def run_balance_sync() -> bool:
+def run_balance_sync(actual_list: Optional[list] = None) -> bool:
     """실제 잔고와 held_stock_record.json을 비교해서 불일치를 수정한다.
+
+    Args:
+        actual_list: 이미 조회된 잔고 리스트.
+                     None이면 내부에서 ls_client.get_balance()를 호출한다.
 
     Returns:
         True  — 동기화 성공 (불일치가 없거나 수정 완료)
         False — 잔고 조회 실패 (API 오류 → 실행 중단 신호)
     """
-    print("[balance_sync] 실제 잔고 조회 중...")
-
-    # ① 실제 잔고 조회
-    actual_list = ls_client.get_balance()
+    if actual_list is None:
+        print("[balance_sync] 실제 잔고 조회 중...")
+        # ① 실제 잔고 조회
+        actual_list = ls_client.get_balance()
+    else:
+        print("[balance_sync] 전달받은 잔고로 동기화 진행")
 
     # get_balance()가 빈 리스트를 반환하면 두 가지 경우:
     #   - API 오류 (토큰 만료, 네트워크 등)

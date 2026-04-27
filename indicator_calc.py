@@ -12,6 +12,13 @@
 
 import daily_chart_cache
 import ls_client
+import time
+
+# run_all 1회 실행 주기 내 메모리 캐시.
+# 파일 캐시가 비어 API 폴백이 발생한 경우 같은 주기에서 재호출을 줄인다.
+_RUNTIME_DAILY_CACHE: dict[str, list] = {}
+_RUNTIME_MINUTE240_CACHE: dict[str, tuple[list, float]] = {}
+_MINUTE240_TTL_SEC = 30 * 60
 
 
 def calc_atr(ohlcv_list: list, period: int = 20) -> float:
@@ -205,8 +212,16 @@ def get_all_indicators(code: str) -> dict:
         # 일봉: 캐시 우선 — 오늘 날짜 캐시 없으면 API 직접 조회(폴백)
         daily = daily_chart_cache.get_daily_cached(code, count=60)
         if not daily:
-            print(f"[indicator] {code} 일봉 캐시 없음 → API 직접 조회")
-            daily = ls_client.get_daily_chart(code, count=25)
+            runtime_daily = _RUNTIME_DAILY_CACHE.get(code, [])
+            if runtime_daily:
+                daily = runtime_daily[-60:] if len(runtime_daily) >= 60 else runtime_daily
+            else:
+                print(f"[indicator] {code} 일봉 캐시 없음 → API 직접 조회")
+                daily = ls_client.get_daily_chart(code, count=60)
+                if daily:
+                    _RUNTIME_DAILY_CACHE[code] = daily
+                    # 파일 캐시에도 반영해 같은 실행 주기의 타 모듈 폴백을 줄인다.
+                    daily_chart_cache.update_daily_cache(code, daily)
         if not daily:
             print(f"[indicator] {code} 일봉 데이터 없음")
             return default
@@ -216,9 +231,17 @@ def get_all_indicators(code: str) -> dict:
         # 240분봉: 캐시 우선 — 30분 TTL 만료·없으면 API 재조회 후 캐시 갱신
         minute_data = daily_chart_cache.get_minute240_cached(code)
         if not minute_data:
-            minute_data = ls_client.get_minute_chart(code, minute=240, count=25)
-            if minute_data:
-                daily_chart_cache.update_minute240_cache(code, minute_data)
+            runtime_entry = _RUNTIME_MINUTE240_CACHE.get(code)
+            if runtime_entry:
+                runtime_data, fetched_ts = runtime_entry
+                if (time.time() - fetched_ts) <= _MINUTE240_TTL_SEC:
+                    minute_data = runtime_data
+
+            if not minute_data:
+                minute_data = ls_client.get_minute_chart(code, minute=240, count=25)
+                if minute_data:
+                    _RUNTIME_MINUTE240_CACHE[code] = (minute_data, time.time())
+                    daily_chart_cache.update_minute240_cache(code, minute_data)
         minute_close = [m["close"] for m in minute_data] if minute_data else []
 
         return {

@@ -25,6 +25,7 @@
 
 import time
 from datetime import datetime
+from typing import Optional, Set
 
 import pytz
 
@@ -126,7 +127,6 @@ def check_hard_stop(code: str, current_price: int, pos: dict) -> bool:
                 f"사유: {period} 변동성 시간대({now_str}) — 다음 회차에 재확인"
             )
             print(f"[risk_guardian] {msg}")
-            telegram_alert.SendMessage(msg)
             return False  # 이번 회차는 손절하지 않음
 
         # 보류 시간대가 아니면 정상적으로 손절 발동
@@ -223,6 +223,7 @@ def place_exit_order(code: str, qty: int, reason: str, current_price: int = 0):
 
     # 종목명: watchlist → held_stock_record 순으로 조회
     name = _get_stock_name(code)
+    before_qty = ls_client.get_holding_qty(code)
 
     if qty <= 0:
         print(f"[risk_guardian] {name}({code}) 매도 가능 수량=0 → 스킵")
@@ -231,13 +232,18 @@ def place_exit_order(code: str, qty: int, reason: str, current_price: int = 0):
     # ② 전량 매도 주문 실행
     result = ls_client.place_order(code, qty, "SELL", "MARKET")
     if not result["success"]:
-        msg = (f"⚠️ 청산 주문 실패\n"
-               f"종목: {name}({code})\n"
-               f"수량: {qty}주\n"
-               f"사유: {reason}\n"
-               f"오류: {result['message']}")
-        print(f"[risk_guardian] {msg}")
-        telegram_alert.SendMessage(msg)
+        print(
+            f"[risk_guardian] 청산 주문 실패: {name}({code}) {qty}주 "
+            f"| 사유: {reason} | 오류: {result['message']}"
+        )
+        return
+
+    fill = ls_client.wait_for_order_fill(code, "SELL", before_qty, qty)
+    if not fill["filled"]:
+        print(
+            f"[risk_guardian] 청산 체결 미확정 → 기록/알림 스킵: {name}({code}) "
+            f"(요청 {qty}주, 확인 {fill['filled_qty']}주)"
+        )
         return
 
     order_no = result["order_no"]
@@ -316,7 +322,7 @@ def place_exit_order(code: str, qty: int, reason: str, current_price: int = 0):
 # 메인 실행 함수
 # ─────────────────────────────────────────
 
-def run_guardian():
+def run_guardian(balance: Optional[list] = None) -> Set[str]:
     """전체 보유 종목의 손절·익절 조건을 감시하고 청산을 실행한다 (메인 실행 함수).
 
     실행 순서:
@@ -328,22 +334,36 @@ def run_guardian():
     4. 조건 충족 시 즉시 전량 매도
 
     주의: run_all.py에서 가장 먼저 실행한다 (기존 포지션 보호가 최우선).
+
+    Args:
+        balance: 이미 조회된 잔고 리스트.
+                 None이면 내부에서 ls_client.get_balance()를 호출한다.
+
+    Returns:
+        감시 종료 시점 기준 보유 종목 코드 집합.
+        (손절/익절로 청산된 종목은 제외됨)
     """
     print("[risk_guardian] 손절·익절 감시 시작")
 
     # ① 현재 잔고 조회 (실제 보유 수량 기준)
-    try:
-        balance = ls_client.get_balance()
-    except Exception as e:
-        print(f"[risk_guardian] 잔고 조회 오류: {e}")
-        return
+    if balance is None:
+        try:
+            balance = ls_client.get_balance()
+        except Exception as e:
+            print(f"[risk_guardian] 잔고 조회 오류: {e}")
+            return set()
+    else:
+        print("[risk_guardian] 전달받은 잔고로 감시 진행")
 
     if not balance:
         print("[risk_guardian] 보유 종목 없음")
-        return
+        return set()
 
     # ② held_stock_record 조회 (손절가·평균단가 등 기준값)
     position_state = load_position_state()
+    held_codes_after_guard = {
+        item["code"] for item in balance if int(item.get("sellable_qty", 0)) > 0
+    }
 
     # ③ 각 보유 종목 순회
     for item in balance:
@@ -376,6 +396,7 @@ def run_guardian():
         # ④ 하드 손절 먼저 확인 (최우선)
         if check_hard_stop(code, current_price, pos):
             place_exit_order(code, sellable_qty, "2N 하드 손절", current_price)
+            held_codes_after_guard.discard(code)
             continue  # 이미 청산됐으므로 트레일링 스탑은 확인 불필요
 
         # ⑤ 트레일링 스탑 확인 (지표 계산 필요) — API 속도 제한 방지
@@ -385,7 +406,9 @@ def run_guardian():
             exit_reason  = check_trailing_stop(code, current_price, pos, indicators)
             if exit_reason:
                 place_exit_order(code, sellable_qty, exit_reason, current_price)
+                held_codes_after_guard.discard(code)
         except Exception as e:
             print(f"[risk_guardian] {code} 지표 계산 오류: {e}")
 
     print("[risk_guardian] 손절·익절 감시 완료")
+    return held_codes_after_guard

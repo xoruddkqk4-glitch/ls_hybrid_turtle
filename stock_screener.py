@@ -37,6 +37,10 @@ from telegram_alert import SendMessage
 # 한국 표준시 (KST, UTC+9)
 _KST = pytz.timezone("Asia/Seoul")
 
+# 실행 주기 내 지표 런타임 캐시.
+# premarket / market_open 각 실행에서 같은 종목 지표 재계산 시 API 중복 호출을 줄인다.
+_SCREENER_INDICATOR_CACHE: dict[str, dict] = {}
+
 # ─────────────────────────────────────────
 # 설정 상수
 # ─────────────────────────────────────────
@@ -320,7 +324,7 @@ def _calc_indicators(pool: dict) -> dict:
             print(f"[screener]   지표 계산 {i}/{total}...")
 
         time.sleep(1.5)  # 종목별 t8451 API 연속 호출 제한 방지 (0.5 → 1.5초로 증가)
-        indicators = indicator_calc.get_screener_indicators(code)
+        indicators = _get_screener_indicators_cached(code)
 
         atr       = indicators["atr"]
         atr_ratio = indicators["atr_ratio"]
@@ -517,7 +521,7 @@ def _refresh_volume(candidates: dict) -> dict:
             continue
 
         # 지표 계산
-        ind = indicator_calc.get_screener_indicators(code)
+        ind = _get_screener_indicators_cached(code)
         if ind["atr"] == 0.0 or ind["atr_ratio"] < ATR_RATIO_MIN:
             continue
         price = t_item["price"]
@@ -540,6 +544,20 @@ def _refresh_volume(candidates: dict) -> dict:
         print(f"[screener] 당일 신규 진입 종목 {added}개 추가")
 
     return updated
+
+
+def _get_screener_indicators_cached(code: str) -> dict:
+    """스크리너 지표를 런타임 캐시와 함께 반환한다.
+
+    같은 실행 주기에서 동일 종목이 다시 등장하면 API를 재호출하지 않는다.
+    """
+    cached = _SCREENER_INDICATOR_CACHE.get(code)
+    if cached:
+        return cached
+
+    indicators = indicator_calc.get_screener_indicators(code)
+    _SCREENER_INDICATOR_CACHE[code] = indicators
+    return indicators
 
 
 # ─────────────────────────────────────────

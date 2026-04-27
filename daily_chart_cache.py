@@ -215,3 +215,29 @@ def update_minute240_cache(code: str, minute240_data: list) -> None:
         }
 
     _save_cache(cache)
+
+
+def update_daily_cache(code: str, daily_data: list) -> None:
+    """일봉 재조회 결과를 캐시에 덮어쓴다. 해당 종목의 일봉 항목만 갱신한다.
+
+    Args:
+        code:       종목코드 6자리
+        daily_data: ls_client.get_daily_chart()가 반환한 일봉 리스트
+    """
+    cache = _load_cache()
+    today = datetime.now(_KST).strftime("%Y-%m-%d")
+
+    if code in cache:
+        # 기존 항목의 일봉만 교체 (240분봉은 그대로 유지)
+        cache[code]["daily"] = daily_data
+        cache[code]["daily_date"] = today
+    else:
+        # 캐시에 없는 종목
+        cache[code] = {
+            "daily": daily_data,
+            "daily_date": today,
+            "minute240": [],
+            "minute240_fetched_at": datetime.now(_KST).strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    _save_cache(cache)

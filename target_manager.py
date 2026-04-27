@@ -34,6 +34,7 @@ import json
 import os
 import time
 from datetime import datetime
+from typing import Optional, Set
 
 import pytz
 
@@ -242,7 +243,7 @@ def update_above_target_time(code: str, current_price: int, stock_record: dict) 
 # ─────────────────────────────────────────
 
 
-def run_update():
+def run_update(held_codes: Optional[Set[str]] = None):
     """미보유 종목 목표가 갱신 + 터틀 신호 체크 (메인 실행 함수).
 
     실행 순서:
@@ -253,16 +254,23 @@ def run_update():
        c. 터틀 시스템1(20일), 시스템2(55일) 신고가 돌파 여부 기록
        d. 30분 가드 타이머 상태 업데이트
     3. 보유 중인 종목은 unheld_record에서 제거
+
+    Args:
+        held_codes: 이미 파악한 보유 종목 코드 집합.
+                    None이면 내부에서 ls_client.get_balance()로 조회한다.
     """
     print("[target_manager] 목표가 갱신 시작")
 
     # ① 현재 보유 중인 종목 코드 목록 파악
-    try:
-        balance    = ls_client.get_balance()
-        held_codes = {item["code"] for item in balance}
-    except Exception as e:
-        print(f"[target_manager] 잔고 조회 오류: {e}")
-        held_codes = set()
+    if held_codes is None:
+        try:
+            balance    = ls_client.get_balance()
+            held_codes = {item["code"] for item in balance}
+        except Exception as e:
+            print(f"[target_manager] 잔고 조회 오류: {e}")
+            held_codes = set()
+    else:
+        print(f"[target_manager] 전달받은 보유 종목 사용: {len(held_codes)}개")
 
     # ② 미보유 종목 목록 (감시 종목 중 보유 안 한 것만)
     watchlist    = get_watchlist()
@@ -291,6 +299,9 @@ def run_update():
                 print(f"[target_manager] {code} 일봉 캐시 없음 → API 직접 조회")
                 time.sleep(5.0)
                 daily_60 = ls_client.get_daily_chart(code, count=60)
+                if daily_60:
+                    # 폴백 결과를 파일 캐시에 즉시 반영해 같은 실행 주기의 중복 폴백을 줄인다.
+                    daily_chart_cache.update_daily_cache(code, daily_60)
 
             if not daily_60:
                 print(f"[target_manager] {code} 일봉 데이터 없음 → 스킵")

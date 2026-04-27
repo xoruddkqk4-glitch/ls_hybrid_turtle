@@ -151,11 +151,17 @@ def main():
     print(f"[run_all] 로그인 성공 ({mode_str} 모드) ✅")
     _step_done(t, "STEP 1: LS증권 로그인")
 
+    # 이후 단계에서 중복 조회를 피하기 위해 잔고를 1회만 조회해 공유한다.
+    # (balance_sync, risk_guardian에서 재사용)
+    t = _step_start("STEP 1-0: 잔고 1회 조회 (API 최적화)")
+    shared_balance = ls_client.get_balance()
+    _step_done(t, "STEP 1-0: 잔고 1회 조회")
+
     # ─────────────────────────────────────
     # STEP 1-A: 잔고 동기화 (수동 매매 반영)
     # ─────────────────────────────────────
     t = _step_start("STEP 1-A: 잔고 동기화")
-    sync_ok = balance_sync.run_balance_sync()
+    sync_ok = balance_sync.run_balance_sync(shared_balance)
     if not sync_ok:
         msg = "⚠️ [run_all] 잔고 조회 실패 → 자동매매 중단"
         print(msg)
@@ -180,8 +186,9 @@ def main():
     # STEP 2: 기존 포지션 손절·익절 감시 (최우선)
     # ─────────────────────────────────────
     t = _step_start("STEP 2: 손절·익절 감시")
+    held_codes_after_guard = set()
     try:
-        risk_guardian.run_guardian()
+        held_codes_after_guard = risk_guardian.run_guardian(shared_balance)
     except Exception as e:
         msg = f"⚠️ [run_all] 손절·익절 감시 오류: {e}"
         print(msg)
@@ -195,7 +202,7 @@ def main():
     # ─────────────────────────────────────
     t = _step_start("STEP 3: 목표가 갱신")
     try:
-        target_manager.run_update()
+        target_manager.run_update(held_codes_after_guard)
     except Exception as e:
         # 목표가 갱신 오류는 치명적이지 않음 — 로그만 남기고 계속 진행
         msg = f"⚠️ [run_all] 목표가 갱신 오류 (계속 진행): {e}"

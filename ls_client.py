@@ -341,6 +341,79 @@ def get_balance() -> list:
         return []
 
 
+def get_holding_qty(code: str, balance: list = None) -> int:
+    """특정 종목의 현재 보유 수량을 반환한다.
+
+    Args:
+        code:    종목코드 6자리
+        balance: 미리 조회한 잔고 리스트(선택). None이면 내부에서 get_balance() 호출.
+
+    Returns:
+        해당 종목 보유 수량(정수). 없으면 0.
+    """
+    rows = balance if balance is not None else get_balance()
+    for item in rows:
+        if item.get("code") == code:
+            return int(item.get("qty", 0))
+    return 0
+
+
+def wait_for_order_fill(
+    code: str,
+    side: str,
+    before_qty: int,
+    expected_qty: int,
+    retries: int = 4,
+    wait_sec: float = 1.0,
+) -> dict:
+    """주문 후 잔고 변화를 확인해 실제 체결 여부를 판단한다.
+
+    BUY: after_qty - before_qty >= expected_qty 이면 체결로 간주
+    SELL: before_qty - after_qty >= expected_qty 이면 체결로 간주
+
+    Returns:
+        {
+            "filled": bool,       # 기대 수량 기준 체결 여부
+            "after_qty": int,     # 확인 시점 최종 보유수량
+            "filled_qty": int,    # 확인된 체결 수량 변화
+            "partial": bool,      # 부분 체결 여부 (0 < filled_qty < expected_qty)
+        }
+    """
+    _check_login()
+
+    side_norm = side.upper()
+    if side_norm not in ("BUY", "SELL"):
+        return {"filled": False, "after_qty": before_qty, "filled_qty": 0, "partial": False}
+
+    last_after = before_qty
+    for i in range(max(retries, 1)):
+        if i > 0:
+            time.sleep(wait_sec)
+
+        after_qty = get_holding_qty(code)
+        last_after = after_qty
+
+        if side_norm == "BUY":
+            delta = max(after_qty - before_qty, 0)
+        else:
+            delta = max(before_qty - after_qty, 0)
+
+        if delta >= expected_qty:
+            return {"filled": True, "after_qty": after_qty, "filled_qty": delta, "partial": False}
+
+    # 재시도 끝까지 기대 수량 체결이 확인되지 않은 경우
+    if side_norm == "BUY":
+        delta = max(last_after - before_qty, 0)
+    else:
+        delta = max(before_qty - last_after, 0)
+    return {
+        "filled": False,
+        "after_qty": last_after,
+        "filled_qty": delta,
+        "partial": 0 < delta < expected_qty,
+    }
+
+
 # ─────────────────────────────────────────
 # 주문
 # ─────────────────────────────────────────

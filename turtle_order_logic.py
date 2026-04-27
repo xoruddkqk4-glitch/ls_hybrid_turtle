@@ -279,13 +279,20 @@ def place_entry_order(
         return
 
     name = watchlist[code]["name"]
+    before_qty = ls_client.get_holding_qty(code)
 
     # ② 매수 주문 실행
     result = ls_client.place_order(code, qty, "BUY", "MARKET")
     if not result["success"]:
-        msg = f"⚠️ 진입 주문 실패\n종목: {name}({code})\n수량: {qty}주\n오류: {result['message']}"
-        print(f"[turtle] {msg}")
-        telegram_alert.SendMessage(msg)
+        print(f"[turtle] 진입 주문 실패: {name}({code}) {qty}주 | 오류: {result['message']}")
+        return
+
+    fill = ls_client.wait_for_order_fill(code, "BUY", before_qty, qty)
+    if not fill["filled"]:
+        print(
+            f"[turtle] 진입 체결 미확정 → 기록/알림 스킵: {name}({code}) "
+            f"(요청 {qty}주, 확인 {fill['filled_qty']}주)"
+        )
         return
 
     order_no = result["order_no"]
@@ -370,6 +377,7 @@ def place_pyramid_order(code: str, qty: int, price: int, atr_n: float):
         return
 
     name = watchlist[code]["name"]
+    before_qty = ls_client.get_holding_qty(code)
 
     # ② 기존 포지션 상태 확인
     position_state = load_position_state()
@@ -389,12 +397,18 @@ def place_pyramid_order(code: str, qty: int, price: int, atr_n: float):
     # ③ 피라미딩 매수 주문 실행
     result = ls_client.place_order(code, qty, "BUY", "MARKET")
     if not result["success"]:
-        msg = (f"⚠️ 피라미딩 주문 실패\n"
-               f"종목: {name}({code})\n"
-               f"수량: {qty}주 ({current_unit+1}차)\n"
-               f"오류: {result['message']}")
-        print(f"[turtle] {msg}")
-        telegram_alert.SendMessage(msg)
+        print(
+            f"[turtle] 피라미딩 주문 실패: {name}({code}) {qty}주 "
+            f"({current_unit+1}차) | 오류: {result['message']}"
+        )
+        return
+
+    fill = ls_client.wait_for_order_fill(code, "BUY", before_qty, qty)
+    if not fill["filled"]:
+        print(
+            f"[turtle] 피라미딩 체결 미확정 → 기록/알림 스킵: {name}({code}) "
+            f"(요청 {qty}주, 확인 {fill['filled_qty']}주)"
+        )
         return
 
     order_no = result["order_no"]
