@@ -384,7 +384,8 @@ def run_guardian(balance: Optional[list] = None) -> Set[str]:
         # held_stock_record에 있으면 감시 목록 여부와 무관하게 손절·익절 감시 계속
         # (09:05 이후 목록에서 빠진 종목도 보유 중이면 보호한다)
         pos  = position_state[code]
-        name = _get_stock_name(code)
+        # 종목명 우선순위: 잔고 응답(name) → watchlist → held_stock_record → code
+        name = str(item.get("name") or "").strip() or _get_stock_name(code)
 
         if code not in watchlist:
             print(f"[risk_guardian] {name}({code}) ⚠️ 감시 목록에서 제외됐지만 보유 중 "

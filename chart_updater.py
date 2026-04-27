@@ -1,7 +1,8 @@
 # chart_updater.py
 # 실현 손익 차트 업데이터
 #
-# 구글 스프레드시트의 "포트폴리오 추이" 시트에서 일별 실현 손익을 읽어,
+# 구글 스프레드시트의 "포트폴리오 추이" 시트에서
+# 일별 실현손익·누적수익금을 읽어,
 # "손익차트" 시트에 콤보 차트(막대 + 선)를 자동으로 그린다.
 #
 # 사용법:
@@ -11,9 +12,8 @@
 #   from chart_updater import update_pnl_chart
 #   update_pnl_chart()
 
-import json
 import os
-from collections import defaultdict
+from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
 
@@ -22,9 +22,8 @@ load_dotenv()
 # 구글 시트 탭 이름
 CHART_SHEET_NAME = "손익차트"  # 차트를 그릴 탭
 
-# trade_ledger.json 경로 (스크립트 위치 기준)
-_DIR         = os.path.dirname(os.path.abspath(__file__))
-LEDGER_FILE  = os.path.join(_DIR, "trade_ledger.json")
+# 포트폴리오 추이 시트 탭 이름
+PORTFOLIO_SHEET_NAME = "포트폴리오 추이"
 
 
 # ─────────────────────────────────────────
@@ -69,76 +68,84 @@ def _get_spreadsheet():
     return spreadsheet
 
 
-def _build_chart_data():
-    """
-    trade_ledger.json에서 SELL 체결 건의 수익금을 날짜별로 합산해
-    일일 손익과 누적 손익 목록을 반환한다.
+def _parse_money(cell_value: str) -> int:
+    """금액 문자열을 정수로 변환한다.
 
-    당일 수익금이 없는 날은 0으로 표시한다.
-    profit_amount 필드가 없는 오래된 기록은 profit_rate에서 근사값으로 계산한다.
+    예: "+1,200" -> 1200, "-500" -> -500, "" -> 0
+    """
+    if cell_value is None:
+        return 0
+    s = str(cell_value).strip()
+    if not s:
+        return 0
+    s = s.replace(",", "").replace("+", "")
+    try:
+        return int(float(s))
+    except ValueError:
+        return 0
+
+
+def _build_chart_data_from_portfolio(spreadsheet):
+    """
+    "포트폴리오 추이" 시트의 실현손익·누적수익금을 읽어
+    "손익차트"용 (MM/DD, 일일손익, 누적손익) 목록을 만든다.
+
+    날짜가 비어 있는 날은 일일손익 0원, 누적손익은 직전값으로 채운다.
+    (즉, 0원인 날도 손익차트에 날짜별로 기록됨)
 
     반환값: [(MM/DD, 일일손익, 누적손익), ...]  날짜 오름차순
     """
-    # trade_ledger.json 읽기
-    if not os.path.exists(LEDGER_FILE):
-        print(f"[차트] trade_ledger.json 없음 → 그릴 데이터가 없습니다.")
-        return []
+    import gspread
 
     try:
-        with open(LEDGER_FILE, "r", encoding="utf-8") as f:
-            records = json.load(f)
-    except (json.JSONDecodeError, IOError) as e:
-        print(f"[차트] trade_ledger.json 읽기 오류: {e}")
+        ws = spreadsheet.worksheet(PORTFOLIO_SHEET_NAME)
+    except gspread.WorksheetNotFound:
+        print(f"[차트] '{PORTFOLIO_SHEET_NAME}' 시트가 없어 차트 데이터를 만들 수 없습니다.")
         return []
 
-    if not isinstance(records, list) or not records:
-        print("[차트] trade_ledger.json에 데이터가 없습니다.")
+    all_rows = ws.get_all_values()
+    if not all_rows or len(all_rows) <= 1:
+        print(f"[차트] '{PORTFOLIO_SHEET_NAME}' 데이터가 없습니다.")
         return []
 
-    # 날짜별 수익금 합산 (SELL 거래만)
-    daily_pnl: dict[str, int] = defaultdict(int)
-
-    for rec in records:
-        # 매도 건만 집계
-        if rec.get("side") != "SELL":
+    # 날짜별로 마지막 기록값을 사용(같은 날짜에 여러 행이 있을 수 있음)
+    by_date: dict[datetime.date, tuple[int, int]] = {}
+    for row in all_rows[1:]:
+        if not row:
+            continue
+        ts = row[0].strip() if len(row) > 0 else ""
+        if len(ts) < 10:
             continue
 
-        ts_str = rec.get("ts_kst", "")
-        if len(ts_str) < 10:
+        try:
+            day = datetime.strptime(ts[:10], "%Y-%m-%d").date()
+        except ValueError:
             continue
-        date_str = ts_str[:10]  # "YYYY-MM-DD"
 
-        # ① profit_amount 필드가 있으면 그대로 사용
-        profit_amount = rec.get("profit_amount", None)
+        realized = _parse_money(row[6] if len(row) > 6 else "0")      # G열 실현손익
+        cumulative = _parse_money(row[9] if len(row) > 9 else "0")    # J열 누적수익금
+        by_date[day] = (realized, cumulative)
 
-        # ② 없으면 profit_rate와 gross_amount로 근사 계산
-        #    profit_rate = (매도가 - 매입가) / 매입가 × 100
-        #    profit_amount ≈ gross_amount × rate / (1 + rate)
-        if profit_amount is None:
-            profit_rate  = rec.get("profit_rate", None)
-            gross_amount = rec.get("gross_amount", 0)
-            if profit_rate is not None and isinstance(profit_rate, (int, float)) and gross_amount:
-                r = profit_rate / 100
-                denom = 1 + r
-                profit_amount = int(gross_amount * r / denom) if abs(denom) > 1e-9 else 0
-            else:
-                profit_amount = 0
-
-        daily_pnl[date_str] += int(profit_amount)
-
-    if not daily_pnl:
-        print("[차트] 매도 체결 내역이 없습니다.")
+    if not by_date:
+        print(f"[차트] '{PORTFOLIO_SHEET_NAME}'에 차트용 손익 데이터가 없습니다.")
         return []
 
-    # 날짜 오름차순 정렬 후 누적 손익 계산
+    # 첫 날짜~마지막 날짜까지 빈 날짜를 0원으로 채운다.
+    start_day = min(by_date.keys())
+    end_day = max(by_date.keys())
+    prev_cumulative = 0
     result = []
-    cumulative = 0
 
-    for date_str in sorted(daily_pnl.keys()):
-        daily      = daily_pnl[date_str]
-        cumulative += daily
-        month_day  = f"{date_str[5:7]}/{date_str[8:10]}"  # "YYYY-MM-DD" → "MM/DD"
-        result.append((month_day, daily, cumulative))
+    day = start_day
+    while day <= end_day:
+        if day in by_date:
+            realized, cumulative = by_date[day]
+            prev_cumulative = cumulative
+        else:
+            realized = 0
+            cumulative = prev_cumulative
+        result.append((day.strftime("%Y-%m-%d"), realized, cumulative))
+        day += timedelta(days=1)
 
     return result
 
@@ -344,19 +351,18 @@ def update_pnl_chart():
     시트가 이미 있으면 삭제하고 새로 만들어 최신 상태로 유지한다.
     """
     try:
-        # ① trade_ledger.json에서 날짜별 수익금 합산 (로컬 파일, API 호출 없음)
-        print("[차트] trade_ledger.json에서 수익금 데이터 읽는 중...")
-        rows = _build_chart_data()
-        if not rows:
-            print("[차트] 그릴 데이터가 없습니다. 종료합니다.")
-            return
-
-        print(f"[차트] {len(rows)}일치 데이터 준비 완료")
-
-        # ② 구글 시트 연결 (차트 쓰기용)
+        # ① 구글 시트 연결
         print("[차트] 구글 스프레드시트 연결 중...")
         spreadsheet = _get_spreadsheet()
         print(f"[차트] 연결 완료: '{spreadsheet.title}'")
+
+        # ② 포트폴리오 추이 시트 기반으로 차트 데이터 생성
+        print(f"[차트] '{PORTFOLIO_SHEET_NAME}'에서 실현손익/누적수익금 읽는 중...")
+        rows = _build_chart_data_from_portfolio(spreadsheet)
+        if not rows:
+            print("[차트] 그릴 데이터가 없습니다. 종료합니다.")
+            return
+        print(f"[차트] {len(rows)}일치 데이터 준비 완료")
 
         # ③ "손익차트" 시트 (재)생성 + 데이터 기록
         ws = _write_chart_sheet(spreadsheet, rows)

@@ -33,6 +33,7 @@ _KST = pytz.timezone("Asia/Seoul")
 # 캐시 파일 경로 (스크립트 폴더 기준 절대 경로)
 _DIR        = os.path.dirname(os.path.abspath(__file__))
 _CACHE_FILE = os.path.join(_DIR, "daily_chart_cache.json")
+_HELD_RECORD_FILE = os.path.join(_DIR, "held_stock_record.json")
 
 # 240분봉 유효 시간: 30분 (초 단위)
 _MINUTE240_TTL_SEC = 30 * 60
@@ -63,6 +64,30 @@ def _save_cache(cache: dict) -> None:
         print(f"[chart_cache] 캐시 파일 저장 오류: {e}")
 
 
+def _load_held_codes() -> set:
+    """held_stock_record.json에서 보유 종목 코드를 읽어온다 (없거나 오류면 빈 set)."""
+    if not os.path.exists(_HELD_RECORD_FILE):
+        return set()
+    try:
+        with open(_HELD_RECORD_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return set(data.keys())
+    except Exception as e:
+        print(f"[chart_cache] held_stock_record 읽기 오류 (무시하고 계속): {e}")
+    return set()
+
+
+def _prune_cache(cache: dict, keep_codes: set) -> int:
+    """cache에서 keep_codes에 없는 종목을 삭제하고 삭제 개수를 반환한다."""
+    removed = 0
+    for code in list(cache.keys()):
+        if code not in keep_codes:
+            del cache[code]
+            removed += 1
+    return removed
+
+
 # ─────────────────────────────────────────
 # 공개 함수 — 캐시 빌드
 # ─────────────────────────────────────────
@@ -77,10 +102,14 @@ def build_cache(watchlist: dict) -> None:
         watchlist: dynamic_watchlist.json의 내용 딕셔너리 {"종목코드": {"name": ..., ...}, ...}
     """
     cache = _load_cache()
+    keep_codes = set(watchlist.keys()) | _load_held_codes()
+    removed = _prune_cache(cache, keep_codes)
     today = datetime.now(_KST).strftime("%Y-%m-%d")
     codes = list(watchlist.keys())
     total = len(codes)
 
+    if removed:
+        print(f"[chart_cache] 캐시 prune 완료: {removed}개 제거 (유지: {len(keep_codes)}개)")
     print(f"[chart_cache] 일봉·240분봉 캐시 빌드 시작 ({total}개 종목)")
 
     for i, code in enumerate(codes, 1):

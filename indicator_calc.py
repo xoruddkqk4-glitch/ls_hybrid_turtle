@@ -13,12 +13,37 @@
 import daily_chart_cache
 import ls_client
 import time
+import json
+import os
+from config import get_watchlist
 
 # run_all 1회 실행 주기 내 메모리 캐시.
 # 파일 캐시가 비어 API 폴백이 발생한 경우 같은 주기에서 재호출을 줄인다.
 _RUNTIME_DAILY_CACHE: dict[str, list] = {}
 _RUNTIME_MINUTE240_CACHE: dict[str, tuple[list, float]] = {}
 _MINUTE240_TTL_SEC = 30 * 60
+
+
+_DIR = os.path.dirname(os.path.abspath(__file__))
+_HELD_RECORD_FILE = os.path.join(_DIR, "held_stock_record.json")
+
+
+def _get_stock_name(code: str) -> str:
+    """종목명을 조회한다. watchlist → held_stock_record → code 순으로 찾는다."""
+    name = get_watchlist().get(code, {}).get("name", "")
+    if name:
+        return name
+    if os.path.exists(_HELD_RECORD_FILE):
+        try:
+            with open(_HELD_RECORD_FILE, "r", encoding="utf-8") as f:
+                held = json.load(f)
+            if isinstance(held, dict):
+                held_name = held.get(code, {}).get("stock_name", "")
+                if held_name:
+                    return held_name
+        except Exception:
+            pass
+    return code
 
 
 def calc_atr(ohlcv_list: list, period: int = 20) -> float:
@@ -183,7 +208,8 @@ def get_screener_indicators(code: str) -> dict:
         }
 
     except Exception as e:
-        print(f"[indicator] {code} 스크리닝 지표 계산 오류: {e}")
+        name = _get_stock_name(code)
+        print(f"[indicator] {name}({code}) 스크리닝 지표 계산 오류: {e}")
         return default
 
 
@@ -209,6 +235,7 @@ def get_all_indicators(code: str) -> dict:
     default = {"atr": 0.0, "ma5": 0.0, "ma20": 0.0, "day10_low": 0, "ma240_20": 0.0}
 
     try:
+        name = _get_stock_name(code)
         # 일봉: 캐시 우선 — 오늘 날짜 캐시 없으면 API 직접 조회(폴백)
         daily = daily_chart_cache.get_daily_cached(code, count=60)
         if not daily:
@@ -216,14 +243,14 @@ def get_all_indicators(code: str) -> dict:
             if runtime_daily:
                 daily = runtime_daily[-60:] if len(runtime_daily) >= 60 else runtime_daily
             else:
-                print(f"[indicator] {code} 일봉 캐시 없음 → API 직접 조회")
+                print(f"[indicator] {name}({code}) 일봉 캐시 없음 → API 직접 조회")
                 daily = ls_client.get_daily_chart(code, count=60)
                 if daily:
                     _RUNTIME_DAILY_CACHE[code] = daily
                     # 파일 캐시에도 반영해 같은 실행 주기의 타 모듈 폴백을 줄인다.
                     daily_chart_cache.update_daily_cache(code, daily)
         if not daily:
-            print(f"[indicator] {code} 일봉 데이터 없음")
+            print(f"[indicator] {name}({code}) 일봉 데이터 없음")
             return default
 
         close_list = [d["close"] for d in daily]
@@ -253,5 +280,6 @@ def get_all_indicators(code: str) -> dict:
         }
 
     except Exception as e:
-        print(f"[indicator] {code} 지표 계산 오류: {e}")
+        name = _get_stock_name(code)
+        print(f"[indicator] {name}({code}) 지표 계산 오류: {e}")
         return default
