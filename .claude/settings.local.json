@@ -8,7 +8,15 @@
       "Bash(python:*)",
       "Bash(python3:*)",
       "Bash(git rm:*)",
-      "Bash(wc -l /mnt/c/Users/user/Desktop/program_garden/ls_hybrid_turtle/*.py)"
+      "Bash(wc -l /mnt/c/Users/user/Desktop/program_garden/ls_hybrid_turtle/*.py)",
+      "Bash(.venv/Scripts/python test_p4_integration.py)",
+      "Bash(where python *)",
+      "Bash(C:/Users/user/AppData/Local/Python/bin/python.exe *)",
+      "Bash(/c/Users/user/Desktop/python/.venv/Scripts/python.exe *)",
+      "Bash(PYTHONPATH=\"/c/Users/user/Desktop/python/.venv/Lib/site-packages\" /c/Users/user/AppData/Local/Python/bin/python.exe *)",
+      "Bash(PYTHONPATH=\"C:/Users/user/Desktop/python/.venv/Lib/site-packages\" /c/Users/user/AppData/Local/Python/bin/python.exe *)",
+      "Bash(PYTHONIOENCODING=utf-8 PYTHONPATH=\"C:/Users/user/Desktop/python/.venv/Lib/site-packages\" /c/Users/user/AppData/Local/Python/bin/python.exe *)",
+      "Bash(pip install *)"
     ]
   }
 }

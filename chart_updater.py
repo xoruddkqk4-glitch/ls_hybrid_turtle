@@ -159,7 +159,7 @@ def _write_chart_sheet(spreadsheet, rows):
 
     Args:
         spreadsheet: gspread Spreadsheet 객체
-        rows:        [(MM/DD, 일일손익, 누적손익), ...] 데이터
+        rows:        [(날짜, 일일손익, 누적손익), ...] 데이터
 
     Returns:
         ws: 새로 만든 Worksheet 객체
@@ -201,9 +201,10 @@ def _add_combo_chart(spreadsheet, ws, num_data_rows):
     """
     "손익차트" 시트에 콤보 차트를 생성한다.
 
-    파란 막대(COLUMN): B열 — 일일 실현손익
-    빨간 선(LINE):     C열 — 누적 실현손익
+    파란 막대(COLUMN): B열 — 일일 실현손익  (왼쪽 Y축)
+    빨간 선(LINE):     C열 — 누적 실현손익  (왼쪽 Y축, 같은 기준)
 
+    두 시리즈 모두 왼쪽 Y축 하나만 사용하므로 0원 기준선이 자동으로 일치한다.
     Google Sheets API v4 batchUpdate 를 직접 호출해 차트를 생성한다.
 
     Args:
@@ -226,7 +227,7 @@ def _add_combo_chart(spreadsheet, ws, num_data_rows):
                     "basicChart": {
                         # 막대와 선을 하나의 차트에 혼합하는 COMBO 타입
                         "chartType": "COMBO",
-                        "legendPosition": "BOTTOM_LEGEND",
+                        "legendPosition": "TOP_LEGEND",
                         "axis": [
                             {
                                 # X축: 날짜 (A열)
@@ -234,7 +235,7 @@ def _add_combo_chart(spreadsheet, ws, num_data_rows):
                                 "title": "날짜",
                             },
                             {
-                                # Y축: 손익 금액 (B, C열 공용)
+                                # 왼쪽 Y축: 두 시리즈 공용 — 0원 기준이 자동으로 일치
                                 "position": "LEFT_AXIS",
                                 "title": "손익 (원)",
                             },
@@ -277,9 +278,9 @@ def _add_combo_chart(spreadsheet, ws, num_data_rows):
                                 "type": "COLUMN",  # 막대 차트
                                 "colorStyle": {
                                     "rgbColor": {
-                                        "red":   0.27,
-                                        "green": 0.51,
-                                        "blue":  0.71,
+                                        "red":   0.44,
+                                        "green": 0.68,
+                                        "blue":  0.83,
                                     }
                                 },
                             },
@@ -302,23 +303,21 @@ def _add_combo_chart(spreadsheet, ws, num_data_rows):
                                 "type": "LINE",  # 선 차트
                                 "colorStyle": {
                                     "rgbColor": {
-                                        "red":   0.83,
-                                        "green": 0.18,
-                                        "blue":  0.18,
+                                        "red":   0.84,
+                                        "green": 0.15,
+                                        "blue":  0.15,
                                     }
                                 },
-                                # 선 두께 2픽셀
                                 "lineStyle": {
                                     "width": 2,
                                 },
                             },
                         ],
                         # 첫 행을 범례 이름으로 사용
-                        # (B1: "일일 실현손익(원)", C1: "누적 실현손익(원)")
                         "headerCount": 1,
                     }
                 },
-                # 차트 위치: E2 셀 기준으로 배치, 크기 900×500 픽셀
+                # 차트 위치: E2 셀 기준으로 배치, 크기 1000×580 픽셀
                 "position": {
                     "overlayPosition": {
                         "anchorCell": {
@@ -326,8 +325,8 @@ def _add_combo_chart(spreadsheet, ws, num_data_rows):
                             "rowIndex":    1,  # 2행
                             "columnIndex": 4,  # E열
                         },
-                        "widthPixels":  900,
-                        "heightPixels": 500,
+                        "widthPixels":  1000,
+                        "heightPixels": 580,
                     }
                 },
             }
@@ -335,7 +334,7 @@ def _add_combo_chart(spreadsheet, ws, num_data_rows):
     }
 
     spreadsheet.batch_update({"requests": [chart_request]})
-    print("[차트] 콤보 차트 생성 완료 (파란 막대: 일일 손익 / 빨간 선: 누적 손익)")
+    print("[차트] 콤보 차트 생성 완료 (파란 막대: 일일 손익 / 빨간 선: 누적 손익, 단일 왼쪽 축)")
 
 
 # ─────────────────────────────────────────
@@ -367,7 +366,7 @@ def update_pnl_chart():
         # ③ "손익차트" 시트 (재)생성 + 데이터 기록
         ws = _write_chart_sheet(spreadsheet, rows)
 
-        # ④ 콤보 차트 생성
+        # ④ 콤보 차트 생성 (단일 왼쪽 Y축)
         _add_combo_chart(spreadsheet, ws, len(rows))
 
         print(

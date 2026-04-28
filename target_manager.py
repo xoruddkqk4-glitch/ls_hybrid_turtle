@@ -261,7 +261,7 @@ def run_update(held_codes: Optional[Set[str]] = None):
         held_codes: 이미 파악한 보유 종목 코드 집합.
                     None이면 내부에서 ls_client.get_balance()로 조회한다.
     """
-    print("[target_manager] 목표가 갱신 시작")
+    print("[target_manager] 터틀 신호 갱신 시작")
 
     # ① 현재 보유 중인 종목 코드 목록 파악
     if held_codes is None:
@@ -407,17 +407,21 @@ def run_update(held_codes: Optional[Set[str]] = None):
                 code, current_price, unheld_record[code]
             )
 
-            # 로그 출력 (현황 한눈에 보기)
-            name            = watchlist.get(code, {}).get("name", code)
-            above_since     = unheld_record[code]["above_target_since"]
-            pending_target  = unheld_record[code]["pending_target"]
-            reference_price = unheld_record[code].get("reference_price", 0)
-            s1_str          = "✅ S1" if turtle_s1 else "S1미달"
-            s2_str          = "✅ S2" if turtle_s2 else "S2미달"
-            status          = f"타이머({above_since}~)" if above_since else "목표가미달"
+            # 로그 출력 (터틀 신호 현황 한눈에 보기)
+            name     = watchlist.get(code, {}).get("name", code)
+            s1_str   = "✅ S1" if turtle_s1 else "S1미달"
+            s2_str   = "✅ S2" if turtle_s2 else "S2미달"
+            # 돌파 시각은 HH:MM 형식만 표시 (S2 우선)
+            s2_since = unheld_record[code].get("turtle_s2_breakout_since", "")
+            s1_since = unheld_record[code].get("turtle_s1_breakout_since", "")
+            if turtle_s2 and s2_since:
+                since_str = f" / S2돌파:{s2_since[11:16]}"
+            elif turtle_s1 and s1_since:
+                since_str = f" / S1돌파:{s1_since[11:16]}"
+            else:
+                since_str = ""
             print(f"[target_manager] {name}({code}) "
-                  f"현재가:{current_price:,}원 / 기준가:{reference_price:,}원 / "
-                  f"목표가:{pending_target:,}원 / {s1_str} / {s2_str} / {status}")
+                  f"현재가:{current_price:,}원 / {s1_str} / {s2_str}{since_str}")
 
         # ⑥ 보유 종목은 unheld_record에서 제거
         for code in list(unheld_record.keys()):
@@ -428,4 +432,4 @@ def run_update(held_codes: Optional[Set[str]] = None):
         # ⑦ 저장
         save_unheld_record(unheld_record)
 
-    print("[target_manager] 목표가 갱신 완료")
+    print("[target_manager] 터틀 신호 갱신 완료")

@@ -198,17 +198,17 @@ def main():
     _step_done(t, "STEP 2: 손절·익절 감시")
 
     # ─────────────────────────────────────
-    # STEP 3: 미보유 종목 목표가 갱신
+    # STEP 3: 미보유 종목 터틀 신호 갱신
     # ─────────────────────────────────────
-    t = _step_start("STEP 3: 목표가 갱신")
+    t = _step_start("STEP 3: 터틀 신호 갱신")
     try:
         target_manager.run_update(held_codes_after_guard)
     except Exception as e:
-        # 목표가 갱신 오류는 치명적이지 않음 — 로그만 남기고 계속 진행
-        msg = f"⚠️ [run_all] 목표가 갱신 오류 (계속 진행): {e}"
+        # 터틀 신호 갱신 오류는 치명적이지 않음 — 로그만 남기고 계속 진행
+        msg = f"⚠️ [run_all] 터틀 신호 갱신 오류 (계속 진행): {e}"
         print(msg)
         SendMessage(msg)
-    _step_done(t, "STEP 3: 목표가 갱신")
+    _step_done(t, "STEP 3: 터틀 신호 갱신")
 
     # ─────────────────────────────────────
     # STEP 4: 30분 가드 체크 (진입 신호 종목 파악)
