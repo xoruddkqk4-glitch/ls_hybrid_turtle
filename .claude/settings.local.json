@@ -16,7 +16,8 @@
       "Bash(PYTHONPATH=\"/c/Users/user/Desktop/python/.venv/Lib/site-packages\" /c/Users/user/AppData/Local/Python/bin/python.exe *)",
       "Bash(PYTHONPATH=\"C:/Users/user/Desktop/python/.venv/Lib/site-packages\" /c/Users/user/AppData/Local/Python/bin/python.exe *)",
       "Bash(PYTHONIOENCODING=utf-8 PYTHONPATH=\"C:/Users/user/Desktop/python/.venv/Lib/site-packages\" /c/Users/user/AppData/Local/Python/bin/python.exe *)",
-      "Bash(pip install *)"
+      "Bash(pip install *)",
+      "Bash(git push *)"
     ]
   }
 }

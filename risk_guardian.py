@@ -369,7 +369,7 @@ def run_guardian(balance: Optional[list] = None) -> Set[str]:
     for item in balance:
         code         = item["code"]
         current_price = int(item["current_price"])
-        sellable_qty  = item["sellable_qty"]
+        sellable_qty  = int(item["sellable_qty"])
 
         watchlist = get_watchlist()
 

@@ -354,7 +354,7 @@ def run_update(held_codes: Optional[Set[str]] = None):
                     # 처음 등록 시점에 이미 신호가 True이면 지금 시각을 돌파 시각으로 기록
                     "turtle_s1_breakout_since": now_kst_str if turtle_s1 else None,
                     "turtle_s2_breakout_since": now_kst_str if turtle_s2 else None,
-                    "last_updated":             None,
+                    "last_updated":             now_kst_str,
                 }
             else:
                 reference_price = unheld_record[code].get("reference_price", 0)

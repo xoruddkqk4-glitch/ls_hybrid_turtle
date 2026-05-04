@@ -31,6 +31,7 @@ _WATCHLIST_PATH = os.path.join(_DIR, "dynamic_watchlist.json")
 
 # 모듈 수준 캐시 — 같은 프로세스 안에서 파일을 두 번 읽지 않도록 저장
 _watchlist_cache: dict | None = None
+_watchlist_cache_date: str = ""  # 캐시가 로드된 날짜 (YYYYMMDD)
 
 
 def get_watchlist() -> dict:
@@ -49,10 +50,11 @@ def get_watchlist() -> dict:
         watchlist_config.json 에 기재하면 stock_screener가 최종 50개 선정 시
         이미 반영해서 저장한다. 이 함수에서 별도 필터를 적용하지 않는다.
     """
-    global _watchlist_cache
+    global _watchlist_cache, _watchlist_cache_date
 
-    # 캐시가 있으면 바로 반환
-    if _watchlist_cache is not None:
+    # 캐시가 있고 오늘 날짜인 경우에만 바로 반환
+    today_str = datetime.now(_KST).strftime("%Y%m%d")
+    if _watchlist_cache is not None and _watchlist_cache_date == today_str:
         return _watchlist_cache
 
     if not os.path.exists(_WATCHLIST_PATH):
@@ -64,7 +66,6 @@ def get_watchlist() -> dict:
             data = json.load(f)
 
         # 오늘 날짜 확인
-        today_str = datetime.now(_KST).strftime("%Y%m%d")
         file_date = data.get("date", "")
 
         if file_date != today_str:
@@ -76,6 +77,7 @@ def get_watchlist() -> dict:
 
         stocks = data.get("stocks", {})
         _watchlist_cache = stocks
+        _watchlist_cache_date = today_str  # 캐시 날짜 기록
         print(f"[config] 감시 종목 {len(stocks)}개 로드 완료")
         return stocks
 
