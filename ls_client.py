@@ -18,7 +18,6 @@ from dotenv import load_dotenv
 from programgarden_finance.ls import LS
 from programgarden_finance.ls.korea_stock.market.t8407.blocks import T8407InBlock
 from programgarden_finance.ls.korea_stock.chart.t8451.blocks import T8451InBlock
-from programgarden_finance.ls.korea_stock.chart.t8452.blocks import T8452InBlock
 from programgarden_finance.ls.korea_stock.order.CSPAT00601.blocks import CSPAT00601InBlock1
 from programgarden_finance.ls.korea_stock.accno.t0424.blocks import T0424InBlock
 from programgarden_finance.ls.korea_stock.sector.t1532.blocks import T1532InBlock
@@ -191,82 +190,6 @@ def get_daily_chart(code: str, count: int = 25) -> list:
             else:
                 # 재시도 횟수 초과이거나 다른 종류의 오류
                 print(f"[ls_client] 일봉 차트 조회 오류 ({code}): {e}")
-                return []
-
-    return []
-
-
-def get_minute_chart(code: str, minute: int = 240, count: int = 25) -> list:
-    """분봉 OHLCV 데이터를 조회한다 (t8452).
-
-    240분봉(4시간봉) 20MA 계산에 사용한다. 기본값은 240분봉.
-
-    Args:
-        code:   종목코드 6자리
-        minute: 분봉 단위 (기본 240 = 4시간봉)
-        count:  요청 건수 (기본 25개)
-
-    Returns:
-        날짜+시간 오름차순 정렬된 OHLCV 딕셔너리 리스트
-        [{"date": "20260413", "time": "093000", "open": 74000,
-          "high": 75500, "low": 73500, "close": 75000, "volume": 12345}, ...]
-    """
-    _check_login()
-
-    # 호출 제한(HTTP 500) 시 재시도 설정
-    _MAX_RETRIES = 3    # 재시도 횟수
-    _RETRY_WAIT  = 10.0 # 재시도 대기 시간 (초)
-
-    # t8452는 sdate/edate 없이 호출하면 빈 결과를 반환하므로 명시적으로 지정
-    # edate = 오늘, sdate = 오늘로부터 (count × minute / 390 + 5) 영업일 전
-    # 390분(하루 장 시간) 기준으로 count개 캔들이 필요한 날수를 계산
-    today     = datetime.now(_KST)
-    days_back = max(int(count * minute / 390) + 10, 30)  # 여유있게 계산
-    sdate     = (today - timedelta(days=days_back)).strftime("%Y%m%d")
-    edate     = today.strftime("%Y%m%d")
-
-    for attempt in range(_MAX_RETRIES):
-        try:
-            response = _ls.korea_stock().chart().t8452(
-                T8452InBlock(
-                    shcode=code,
-                    ncnt=minute,    # 분 단위 (240 = 4시간봉)
-                    qrycnt=count,
-                    nday="0",       # 0: 날짜 범위 방식 사용
-                    sdate=sdate,    # 시작일자 (YYYYMMDD)
-                    edate=edate,    # 종료일자 (YYYYMMDD)
-                )
-            ).req()
-
-            # 날짜+시간 기준 오름차순 정렬
-            items = sorted(response.block, key=lambda x: (x.date, x.time))
-            result = []
-            for item in items:
-                result.append({
-                    "date":   item.date,
-                    "time":   item.time,
-                    "open":   item.open,
-                    "high":   item.high,
-                    "low":    item.low,
-                    "close":  item.close,
-                    "volume": item.jdiff_vol,
-                })
-            return result
-
-        except Exception as e:
-            err_str = str(e)
-            # '호출 거래건수 초과(HTTP 500)' 오류이면 대기 후 재시도
-            is_rate_limit = "500" in err_str or "호출 거래건수" in err_str
-            if is_rate_limit and attempt < _MAX_RETRIES - 1:
-                print(
-                    f"[ls_client] t8452 호출 제한 오류 ({code}) → "
-                    f"{_RETRY_WAIT:.0f}초 후 재시도 "
-                    f"({attempt + 1}/{_MAX_RETRIES}): {err_str}"
-                )
-                time.sleep(_RETRY_WAIT)
-            else:
-                # 재시도 횟수 초과이거나 다른 종류의 오류
-                print(f"[ls_client] 분봉 차트 조회 오류 ({code}, {minute}분): {e}")
                 return []
 
     return []

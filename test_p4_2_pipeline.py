@@ -80,12 +80,6 @@ def _run_update_with_mocks(
          patch("target_manager.daily_chart_cache.get_daily_cached",
                return_value=dummy_candles), \
          patch("target_manager.daily_chart_cache.update_daily_cache"), \
-         patch("target_manager.daily_chart_cache.get_minute240_cached",
-               return_value=dummy_candles[:25]), \
-         patch("target_manager.daily_chart_cache.update_minute240_cache"), \
-         patch("target_manager.indicator_calc.calc_atr",     return_value=500), \
-         patch("target_manager.indicator_calc.calc_ma",      return_value=47_000), \
-         patch("target_manager.indicator_calc.calc_10day_low", return_value=45_000), \
          patch("target_manager.indicator_calc.calc_n_day_high",
                side_effect=_make_indicator_side_effect(s1_high, s2_high)), \
          patch("target_manager.time.sleep"), \

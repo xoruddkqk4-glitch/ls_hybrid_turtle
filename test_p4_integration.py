@@ -5,9 +5,8 @@
 #   [1] indicator_calc.calc_n_day_high — N일 신고가 계산
 #   [2] timer_agent._check_turtle_30min — 터틀 30분 가드 (10시 필터 포함)
 #   [3] timer_agent.run_timer_check — 터틀 AND 30분 가드 진입 신호 통합
-#   [4] 09:05 확정 시 unheld_record에 목표가·기준가 즉시 기록
-#   [5] 보유 종목 held_record에 pending_target·reference_price 필드 기록
-#   [6] 감시 목록에서 빠진 보유 종목도 손절 감시 정상 작동
+#   [4] 09:05 확정 시 unheld_record에 터틀 신호 필드 즉시 기록
+#   [5] 감시 목록에서 빠진 보유 종목도 손절 감시 정상 작동
 #
 # 실행: python test_p4_integration.py
 
@@ -280,11 +279,11 @@ class TestRunTimerCheck(unittest.TestCase):
 
 # ══════════════════════════════════════════════════════════
 # 테스트 4: target_manager.initialize_unheld_record
-#           09:05 종목 확정 시 목표가·기준가 즉시 저장
+#           09:05 종목 확정 시 터틀 신호 필드 즉시 저장
 # ══════════════════════════════════════════════════════════
 
 class TestInitializeUnheldRecord(unittest.TestCase):
-    """09:05 배치에서 신규 종목 목표가·기준가가 즉시 저장되는지 확인"""
+    """09:05 배치에서 신규 종목 터틀 신호 필드가 즉시 저장되는지 확인"""
 
     def test_신규_종목_필드_저장(self):
         import target_manager
@@ -294,28 +293,20 @@ class TestInitializeUnheldRecord(unittest.TestCase):
 
         with patch("target_manager.load_unheld_record", return_value={}), \
              patch("target_manager.save_unheld_record",
-                   side_effect=lambda d: saved.update(d)), \
-             patch("target_manager.ls_client.get_multi_price",
-                   return_value={"005930": 70000}):
+                   side_effect=lambda d: saved.update(d)):
             target_manager.initialize_unheld_record(watchlist)
 
         self.assertIn("005930", saved, "005930이 저장되어야 함")
         rec = saved["005930"]
 
-        # 필수 필드 존재 확인 (새 필드 포함)
-        for field in ("pending_target", "reference_price",
-                      "turtle_s1_signal", "turtle_s2_signal",
-                      "above_target_since",
+        # 필수 필드 존재 확인
+        for field in ("turtle_s1_signal", "turtle_s2_signal",
                       "turtle_s1_breakout_since", "turtle_s2_breakout_since"):
             self.assertIn(field, rec, f"'{field}' 필드가 있어야 함")
 
         # 초기값 확인
-        self.assertEqual(rec["pending_target"], int(70000 * 1.02),
-                         "초기 목표가 = 현재가 × 1.02")
-        self.assertEqual(rec["reference_price"], 70000, "기준가 = 현재가")
         self.assertFalse(rec["turtle_s1_signal"],  "S1 신호 초기값 = False")
         self.assertFalse(rec["turtle_s2_signal"],  "S2 신호 초기값 = False")
-        self.assertIsNone(rec["above_target_since"],        "타이머 초기값 = None")
         self.assertIsNone(rec["turtle_s1_breakout_since"],  "S1 돌파 시각 초기값 = None")
         self.assertIsNone(rec["turtle_s2_breakout_since"],  "S2 돌파 시각 초기값 = None")
 
@@ -325,9 +316,6 @@ class TestInitializeUnheldRecord(unittest.TestCase):
 
         watchlist = {"005930": {"name": "삼성전자"}}
         existing = {"005930": {
-            "pending_target":           75000,
-            "reference_price":          73000,
-            "above_target_since":       "2026-04-15 09:15:00",
             "turtle_s1_signal":         True,
             "turtle_s2_signal":         False,
             "turtle_s1_breakout_since": "2026-04-15 09:15:00",
@@ -337,17 +325,14 @@ class TestInitializeUnheldRecord(unittest.TestCase):
 
         with patch("target_manager.load_unheld_record", return_value=existing), \
              patch("target_manager.save_unheld_record",
-                   side_effect=lambda d: saved.update(d)), \
-             patch("target_manager.ls_client.get_multi_price", return_value={}):
+                   side_effect=lambda d: saved.update(d)):
             target_manager.initialize_unheld_record(watchlist)
 
         rec = saved.get("005930", existing["005930"])
-        self.assertEqual(rec["above_target_since"], "2026-04-15 09:15:00",
-                         "기존 타이머가 그대로 보존되어야 함")
-        self.assertEqual(rec["pending_target"], 75000,
-                         "기존 목표가가 그대로 보존되어야 함")
         self.assertEqual(rec["turtle_s1_breakout_since"], "2026-04-15 09:15:00",
                          "기존 S1 돌파 시각이 보존되어야 함")
+        self.assertTrue(rec["turtle_s1_signal"],
+                        "기존 S1 신호가 그대로 보존되어야 함")
 
 
 # ══════════════════════════════════════════════════════════

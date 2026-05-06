@@ -1,20 +1,17 @@
 # daily_chart_cache.py
-# 일봉·240분봉 캐시 관리 모듈
+# 일봉 캐시 관리 모듈
 #
 # 역할:
-#   1. 09:05 market_open 직후 build_cache() 로 감시 종목 전체의 일봉·240분봉을 한 번에 저장
-#   2. 이후 모든 모듈이 get_daily_cached() / get_minute240_cached() 로 파일에서 꺼내 씀
-#   3. 240분봉은 30분 TTL — 30분 경과 시 빈 리스트 반환 → 호출자가 API 재조회 후 update_minute240_cache() 호출
-#   4. 캐시 미존재·오류 시 빈 리스트 반환 → 호출자에서 API 직접 조회(폴백) 처리
+#   1. 09:05 market_open 직후 build_cache() 로 감시 종목 전체의 일봉을 한 번에 저장
+#   2. 이후 모든 모듈이 get_daily_cached() 로 파일에서 꺼내 씀
+#   3. 캐시 미존재·오류 시 빈 리스트 반환 → 호출자에서 API 직접 조회(폴백) 처리
 #
 # 저장 파일: daily_chart_cache.json
 # JSON 구조:
 # {
 #   "005930": {
-#     "daily":                [...],   ← 일봉 60개 (OHLCV 리스트, 오름차순)
-#     "daily_date":           "2026-04-16",
-#     "minute240":            [...],   ← 240분봉 25개
-#     "minute240_fetched_at": "2026-04-16 09:05:30"
+#     "daily":      [...],   ← 일봉 60개 (OHLCV 리스트, 오름차순)
+#     "daily_date": "2026-04-16"
 #   }
 # }
 
@@ -34,9 +31,6 @@ _KST = pytz.timezone("Asia/Seoul")
 _DIR        = os.path.dirname(os.path.abspath(__file__))
 _CACHE_FILE = os.path.join(_DIR, "daily_chart_cache.json")
 _HELD_RECORD_FILE = os.path.join(_DIR, "held_stock_record.json")
-
-# 240분봉 유효 시간: 30분 (초 단위)
-_MINUTE240_TTL_SEC = 30 * 60
 
 
 # ─────────────────────────────────────────
@@ -93,10 +87,10 @@ def _prune_cache(cache: dict, keep_codes: set) -> int:
 # ─────────────────────────────────────────
 
 def build_cache(watchlist: dict) -> None:
-    """09:05 market_open 완료 직후 1회 호출 — 감시 종목 전체의 일봉·240분봉을 받아서 저장한다.
+    """09:05 market_open 완료 직후 1회 호출 — 감시 종목 전체의 일봉을 받아서 저장한다.
 
     이 함수가 실행된 뒤부터 run_all.py의 모든 모듈은 API 대신 캐시 파일을 읽는다.
-    종목 간 2초 대기로 t8451·t8452 API 속도 제한을 지킨다.
+    종목 간 2초 대기로 t8451 API 속도 제한을 지킨다.
 
     Args:
         watchlist: dynamic_watchlist.json의 내용 딕셔너리 {"종목코드": {"name": ..., ...}, ...}
@@ -110,7 +104,7 @@ def build_cache(watchlist: dict) -> None:
 
     if removed:
         print(f"[chart_cache] 캐시 prune 완료: {removed}개 제거 (유지: {len(keep_codes)}개)")
-    print(f"[chart_cache] 일봉·240분봉 캐시 빌드 시작 ({total}개 종목)")
+    print(f"[chart_cache] 일봉 캐시 빌드 시작 ({total}개 종목)")
 
     for i, code in enumerate(codes, 1):
         name = watchlist.get(code, {}).get("name", code)
@@ -123,20 +117,10 @@ def build_cache(watchlist: dict) -> None:
         # 일봉 60개 조회 (20일 ATR·MA + 55일 신고가 계산 모두 커버)
         daily = ls_client.get_daily_chart(code, count=60)
 
-        # 일봉·240분봉 사이에도 2초 대기 (같은 종목이라도 연속 호출은 제한에 걸릴 수 있음)
-        time.sleep(2.0)
-
-        # 240분봉 25개 조회 (20MA 계산 + 여유)
-        minute240 = ls_client.get_minute_chart(code, minute=240, count=25)
-
-        now_str = datetime.now(_KST).strftime("%Y-%m-%d %H:%M:%S")
-
         # 종목별 데이터를 캐시 딕셔너리에 저장
         cache[code] = {
-            "daily":                daily    or [],  # API 오류 시 빈 리스트로 저장
-            "daily_date":           today,
-            "minute240":            minute240 or [],
-            "minute240_fetched_at": now_str,
+            "daily":      daily or [],  # API 오류 시 빈 리스트로 저장
+            "daily_date": today,
         }
 
     _save_cache(cache)
@@ -181,70 +165,9 @@ def get_daily_cached(code: str, count: int = 25) -> list:
     return daily[-count:] if len(daily) >= count else daily
 
 
-def get_minute240_cached(code: str) -> list:
-    """240분봉 캐시를 반환한다. 마지막 저장 시각으로부터 30분이 지났으면 빈 리스트를 반환한다.
-
-    빈 리스트를 받은 호출자는 ls_client.get_minute_chart() 로 재조회한 뒤
-    update_minute240_cache() 를 호출해서 캐시를 갱신해야 한다.
-
-    Args:
-        code: 종목코드 6자리
-
-    Returns:
-        240분봉 딕셔너리 리스트. 캐시 없거나 TTL(30분) 만료면 빈 리스트.
-    """
-    cache = _load_cache()
-    entry = cache.get(code)
-
-    if not entry or "minute240_fetched_at" not in entry:
-        return []
-
-    # 마지막 저장 시각과 현재 시각의 차이 계산
-    fetched_str = entry["minute240_fetched_at"]
-    try:
-        fetched_at = _KST.localize(
-            datetime.strptime(fetched_str, "%Y-%m-%d %H:%M:%S")
-        )
-    except ValueError:
-        return []  # 날짜 파싱 실패 → 캐시 무효 처리
-
-    elapsed_sec = (datetime.now(_KST) - fetched_at).total_seconds()
-    if elapsed_sec > _MINUTE240_TTL_SEC:
-        return []  # 30분 TTL 만료
-
-    return entry.get("minute240", [])
-
-
 # ─────────────────────────────────────────
-# 공개 함수 — 240분봉 캐시 갱신
+# 공개 함수 — 캐시 갱신
 # ─────────────────────────────────────────
-
-def update_minute240_cache(code: str, minute240_data: list) -> None:
-    """240분봉 재조회 결과를 캐시에 덮어쓴다. 해당 종목의 240분봉 항목만 갱신한다.
-
-    Args:
-        code:           종목코드 6자리
-        minute240_data: ls_client.get_minute_chart() 가 반환한 240분봉 리스트
-    """
-    cache   = _load_cache()
-    now_str = datetime.now(_KST).strftime("%Y-%m-%d %H:%M:%S")
-    today   = datetime.now(_KST).strftime("%Y-%m-%d")
-
-    if code in cache:
-        # 기존 항목의 240분봉만 교체 (일봉은 그대로 유지)
-        cache[code]["minute240"]            = minute240_data
-        cache[code]["minute240_fetched_at"] = now_str
-    else:
-        # 캐시에 없는 종목 (예: 보유 중이지만 감시 목록 밖인 경우)
-        cache[code] = {
-            "daily":                [],
-            "daily_date":           today,
-            "minute240":            minute240_data,
-            "minute240_fetched_at": now_str,
-        }
-
-    _save_cache(cache)
-
 
 def update_daily_cache(code: str, daily_data: list) -> None:
     """일봉 재조회 결과를 캐시에 덮어쓴다. 해당 종목의 일봉 항목만 갱신한다.
@@ -257,16 +180,13 @@ def update_daily_cache(code: str, daily_data: list) -> None:
     today = datetime.now(_KST).strftime("%Y-%m-%d")
 
     if code in cache:
-        # 기존 항목의 일봉만 교체 (240분봉은 그대로 유지)
         cache[code]["daily"] = daily_data
         cache[code]["daily_date"] = today
     else:
         # 캐시에 없는 종목
         cache[code] = {
-            "daily": daily_data,
+            "daily":      daily_data,
             "daily_date": today,
-            "minute240": [],
-            "minute240_fetched_at": datetime.now(_KST).strftime("%Y-%m-%d %H:%M:%S"),
         }
 
     _save_cache(cache)

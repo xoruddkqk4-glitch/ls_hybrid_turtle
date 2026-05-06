@@ -5,14 +5,12 @@
 #   - ATR(N): 평균 실제 범위 → Unit 수량 계산, 손절가, 피라미딩 트리거에 사용
 #   - 이동평균선(5MA, 20MA): 트레일링 스탑 판단에 사용
 #   - 10일 신저가: 트레일링 스탑 판단에 사용
-#   - 240분봉 20MA: 동적 목표가(pending_target) 계산에 사용
 #
 # 주의: 이 모듈은 daily_chart_cache(캐시 우선)를 통해 데이터를 가져오며,
-#       캐시 미존재·만료 시에는 ls_client를 통해 API를 직접 조회한다.
+#       캐시 미존재 시에는 ls_client를 통해 API를 직접 조회한다.
 
 import daily_chart_cache
 import ls_client
-import time
 import json
 import os
 from config import get_watchlist
@@ -20,8 +18,6 @@ from config import get_watchlist
 # run_all 1회 실행 주기 내 메모리 캐시.
 # 파일 캐시가 비어 API 폴백이 발생한 경우 같은 주기에서 재호출을 줄인다.
 _RUNTIME_DAILY_CACHE: dict[str, list] = {}
-_RUNTIME_MINUTE240_CACHE: dict[str, tuple[list, float]] = {}
-_MINUTE240_TTL_SEC = 30 * 60
 
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
@@ -163,7 +159,6 @@ def calc_n_day_high(ohlcv_list: list, n: int) -> float:
 def get_screener_indicators(code: str) -> dict:
     """스크리닝(종목 선정)에 필요한 지표만 계산한다. 일봉만 사용해서 빠르다.
 
-    get_all_indicators()와 달리 분봉(240분봉) 데이터를 조회하지 않으므로
     수백 개 종목을 빠르게 처리할 때 적합하다.
 
     Args:
@@ -216,7 +211,7 @@ def get_screener_indicators(code: str) -> dict:
 def get_all_indicators(code: str) -> dict:
     """한 종목의 전략에 필요한 모든 지표를 한 번에 계산해서 반환한다.
 
-    내부적으로 ls_client를 통해 일봉과 240분봉 데이터를 가져온다.
+    내부적으로 ls_client를 통해 일봉 데이터를 가져온다.
 
     Args:
         code: 종목코드 6자리 (예: "005930")
@@ -227,12 +222,11 @@ def get_all_indicators(code: str) -> dict:
             "ma5":      74500.0,  # 5일 이동평균: 트레일링 스탑(수익권 체크)에 사용
             "ma20":     73000.0,  # 20일 이동평균 (일봉)
             "day10_low": 71000,   # 10일 신저가: 트레일링 스탑에 사용
-            "ma240_20": 76000.0,  # 240분봉 20MA: 동적 목표가 계산에 사용
         }
         데이터 부족 또는 오류 시 모든 값이 0인 딕셔너리 반환.
     """
     # 초기값 (데이터 부족 등 오류 시 반환)
-    default = {"atr": 0.0, "ma5": 0.0, "ma20": 0.0, "day10_low": 0, "ma240_20": 0.0}
+    default = {"atr": 0.0, "ma5": 0.0, "ma20": 0.0, "day10_low": 0}
 
     try:
         name = _get_stock_name(code)
@@ -255,28 +249,11 @@ def get_all_indicators(code: str) -> dict:
 
         close_list = [d["close"] for d in daily]
 
-        # 240분봉: 캐시 우선 — 30분 TTL 만료·없으면 API 재조회 후 캐시 갱신
-        minute_data = daily_chart_cache.get_minute240_cached(code)
-        if not minute_data:
-            runtime_entry = _RUNTIME_MINUTE240_CACHE.get(code)
-            if runtime_entry:
-                runtime_data, fetched_ts = runtime_entry
-                if (time.time() - fetched_ts) <= _MINUTE240_TTL_SEC:
-                    minute_data = runtime_data
-
-            if not minute_data:
-                minute_data = ls_client.get_minute_chart(code, minute=240, count=25)
-                if minute_data:
-                    _RUNTIME_MINUTE240_CACHE[code] = (minute_data, time.time())
-                    daily_chart_cache.update_minute240_cache(code, minute_data)
-        minute_close = [m["close"] for m in minute_data] if minute_data else []
-
         return {
             "atr":       calc_atr(daily, period=20),
             "ma5":       calc_ma(close_list, period=5),
             "ma20":      calc_ma(close_list, period=20),
             "day10_low": calc_10day_low(daily),
-            "ma240_20":  calc_ma(minute_close, period=20),
         }
 
     except Exception as e:

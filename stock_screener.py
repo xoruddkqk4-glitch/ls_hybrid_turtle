@@ -168,14 +168,14 @@ def run_market_open_screening():
     # 6. dynamic_watchlist.json 저장
     _save_watchlist(watchlist)
 
-    # 7. 신규 종목의 목표가·기준가 즉시 초기화 (09:05 확정 직후)
-    #    이미 unheld_stock_record.json에 있는 종목은 건드리지 않는다 (기존 타이머 보존)
+    # 7. 신규 종목의 터틀 신호 필드 초기화 (09:05 확정 직후)
+    #    이미 unheld_stock_record.json에 있는 종목은 건드리지 않는다 (기존 돌파 시각 보존)
     try:
         target_manager.initialize_unheld_record(watchlist)
     except Exception as e:
-        print(f"[screener] 목표가 초기화 오류 (계속 진행): {e}")
+        print(f"[screener] 터틀 신호 초기화 오류 (계속 진행): {e}")
 
-    # 8. 일봉·240분봉 캐시 빌드 (이후 run_all.py 실행 시 API 재호출 없이 파일에서 읽음)
+    # 8. 일봉 캐시 빌드 (이후 run_all.py 실행 시 API 재호출 없이 파일에서 읽음)
     try:
         daily_chart_cache.build_cache(watchlist)
     except Exception as e:

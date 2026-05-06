@@ -156,7 +156,7 @@ ls_hybrid_turtle/
 │   ├── chart_updater.py        — 구글 시트 손익차트 자동 생성
 │   ├── record_daily_snapshot.py — 일별 포트폴리오 수익률 스냅샷 기록
 │   ├── sector_cache.py         — 종목 테마 캐시 관리
-│   └── daily_chart_cache.py    — 일봉·240분봉 캐시 관리
+│   └── daily_chart_cache.py    — 일봉 캐시 관리
 │
 ├── .env.example                — 환경변수 템플릿 (이 파일을 복사해서 .env 작성)
 ├── requirements.txt            — 필요한 라이브러리 목록
@@ -173,7 +173,7 @@ ls_hybrid_turtle/
 | `unheld_stock_record.json` | 미보유 종목의 신고가 신호·돌파 시각·타이머 상태 |
 | `trade_ledger.json` | 전체 체결 원장 기록 |
 | `sector_cache.json` | 종목별 테마 캐시 |
-| `daily_chart_cache.json` | 일봉·240분봉 캐시 |
+| `daily_chart_cache.json` | 일봉 캐시 |
 
 ---
 
