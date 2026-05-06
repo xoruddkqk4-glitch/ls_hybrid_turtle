@@ -117,7 +117,7 @@ def get_sector_units(state: dict, sector: str) -> int:
 
 
 # 포트폴리오 전체 유닛 상한
-MAX_TOTAL_UNITS = 12
+MAX_TOTAL_UNITS = 15
 
 # 업종별 유닛 상한
 MAX_SECTOR_UNITS = 6
