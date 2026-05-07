@@ -619,10 +619,29 @@ def run_orders(entry_signals: list):
             if qty <= 0:
                 continue
 
+        # 종목 이름 조회 (로그 출력용)
+        pyramid_name = get_watchlist().get(code, {}).get("name", code)
+
+        # 1 Unit 매수금 상한 재검사 (총자본 × 10%)
+        # 폴백 경로(effective_risk_factor 필드 없는 옛 종목)나 시장가 변동으로
+        # qty × 현재가가 상한을 넘으면 cap에 맞춰 자동으로 줄임
+        max_unit_amount = total_capital * MAX_UNIT_PURCHASE_RATIO
+        purchase_amount = qty * current_price
+        if purchase_amount > max_unit_amount:
+            capped_qty = int(max_unit_amount / current_price)
+            if capped_qty <= 0:
+                # 1주 가격이 이미 상한을 넘는 경우 → 이번 사이클 스킵
+                print(f"[turtle] {pyramid_name}({code}) 1주 가격({current_price:,}원)이 "
+                      f"1 Unit 상한({max_unit_amount:,.0f}원) 초과 → 피라미딩 스킵")
+                continue
+            print(f"[turtle] {pyramid_name}({code}) 피라미딩 매수금 상한 초과 → "
+                  f"{qty}주 → {capped_qty}주로 조정 "
+                  f"(매수금: {capped_qty * current_price:,}원 / 상한: {max_unit_amount:,.0f}원)")
+            qty = capped_qty
+
         # 포트폴리오 전체·업종별 유닛 한도 확인 (피라미딩 직전 재확인)
         fresh_state         = load_position_state()
         current_total_units = get_total_units(fresh_state)
-        pyramid_name        = get_watchlist().get(code, {}).get("name", code)
 
         if current_total_units >= MAX_TOTAL_UNITS:
             print(f"[turtle] 포트폴리오 유닛 한도({MAX_TOTAL_UNITS} Unit) 도달 → "
