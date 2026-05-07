@@ -391,8 +391,31 @@ def run_guardian(balance: Optional[list] = None) -> Set[str]:
             print(f"[risk_guardian] {name}({code}) ⚠️ 감시 목록에서 제외됐지만 보유 중 "
                   f"→ 손절·익절 감시 계속")
 
-        print(f"[risk_guardian] {name}({code}) 감시 중 — 현재가: {current_price:,}원 "
-              f"| 손절가: {pos.get('stop_loss_price', 0):,}원")
+        # 평균가/피라미딩가/수익률/수익금을 함께 표시 (한눈에 포지션 상태 파악)
+        avg_buy_price       = pos.get("avg_buy_price", 0)
+        next_pyramid_price  = pos.get("next_pyramid_price", 0)
+        stop_loss_price_val = pos.get("stop_loss_price", 0)
+        # 보유 수량: 잔고의 qty(전체 보유) 사용, 없으면 sellable_qty로 폴백
+        holding_qty = int(item.get("qty", sellable_qty))
+
+        # 수익률·수익금: 평균가가 있을 때만 계산, 없으면 'N/A'
+        if avg_buy_price > 0:
+            profit_pct    = (current_price - avg_buy_price) / avg_buy_price * 100
+            profit_amount = int((current_price - avg_buy_price) * holding_qty)
+            profit_sign   = "+" if profit_pct >= 0 else ""
+            amount_sign   = "+" if profit_amount >= 0 else ""
+            profit_str    = f"({profit_sign}{profit_pct:.2f}%, {amount_sign}{profit_amount:,}원)"
+        else:
+            profit_str    = "(N/A)"
+
+        avg_str     = f"{avg_buy_price:,}원" if avg_buy_price > 0 else "N/A"
+        pyramid_str = f"{next_pyramid_price:,}원" if next_pyramid_price > 0 else "N/A"
+
+        print(f"[risk_guardian] {name}({code}) 감시 중 — "
+              f"현재가: {current_price:,}원 {profit_str} "
+              f"| 평균가: {avg_str} "
+              f"| 손절가: {stop_loss_price_val:,}원 "
+              f"| 피라미딩가: {pyramid_str}")
 
         # ④ 하드 손절 먼저 확인 (최우선)
         if check_hard_stop(code, current_price, pos):

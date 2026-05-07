@@ -230,9 +230,12 @@ def run_update(held_codes: Optional[Set[str]] = None):
                     unheld_record[code]["turtle_s2_breakout_since"] = None
 
             # 로그 출력 (터틀 신호 현황 한눈에 보기)
-            name     = watchlist.get(code, {}).get("name", code)
-            s1_str   = "✅ S1" if turtle_s1 else "S1미달"
-            s2_str   = "✅ S2" if turtle_s2 else "S2미달"
+            name = watchlist.get(code, {}).get("name", code)
+            # S1/S2 신고가는 가격까지 같이 표시 (데이터 부족 시 'N/A')
+            s1_price_str = f"{s1_high:,}원" if s1_high > 0 else "N/A"
+            s2_price_str = f"{s2_high:,}원" if s2_high > 0 else "N/A"
+            s1_str = f"✅ S1({s1_price_str})" if turtle_s1 else f"S1미달({s1_price_str})"
+            s2_str = f"✅ S2({s2_price_str})" if turtle_s2 else f"S2미달({s2_price_str})"
             # 돌파 시각은 HH:MM 형식만 표시 (S2 우선)
             s2_since = unheld_record[code].get("turtle_s2_breakout_since", "")
             s1_since = unheld_record[code].get("turtle_s1_breakout_since", "")
