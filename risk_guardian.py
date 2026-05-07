@@ -398,6 +398,36 @@ def run_guardian(balance: Optional[list] = None) -> Set[str]:
         # 보유 수량: 잔고의 qty(전체 보유) 사용, 없으면 sellable_qty로 폴백
         holding_qty = int(item.get("qty", sellable_qty))
 
+        # 지표 계산 (10일 신저가·5MA) — 매도 기준 비교 + 트레일링 스탑 체크에 모두 사용
+        # API 속도 제한 방지를 위해 종목당 1초 대기
+        try:
+            time.sleep(1.0)
+            indicators = indicator_calc.get_all_indicators(code)
+        except Exception as e:
+            print(f"[risk_guardian] {code} 지표 계산 오류: {e}")
+            indicators = {}
+
+        day10_low = indicators.get("day10_low", 0)
+        ma5       = indicators.get("ma5", 0.0)
+
+        # 매도 기준 후보 3가지를 모은 뒤 "가장 높은 가격"을 가장 먼저 닿는 매도 신호로 표시한다
+        # ① 2N 손절: stop_loss_price (손실·수익 무관 적용)
+        # ② 10일 신저가: day10_low (손실·수익 무관 적용)
+        # ③ 5MA: ma5 (수익권 = 현재가 > 평균가일 때만 매도 신호로 작동)
+        sell_trigger_candidates = []
+        if stop_loss_price_val > 0:
+            sell_trigger_candidates.append((int(stop_loss_price_val), "2N 손절"))
+        if day10_low > 0:
+            sell_trigger_candidates.append((int(day10_low), "10일 신저가"))
+        if ma5 > 0 and avg_buy_price > 0 and current_price > avg_buy_price:
+            sell_trigger_candidates.append((int(ma5), "5MA"))
+
+        if sell_trigger_candidates:
+            trigger_price, trigger_name = max(sell_trigger_candidates, key=lambda x: x[0])
+            sell_trigger_str = f"{trigger_price:,}원 ({trigger_name})"
+        else:
+            sell_trigger_str = "N/A"
+
         # 수익률·수익금: 평균가가 있을 때만 계산, 없으면 'N/A'
         if avg_buy_price > 0:
             profit_pct    = (current_price - avg_buy_price) / avg_buy_price * 100
@@ -414,7 +444,7 @@ def run_guardian(balance: Optional[list] = None) -> Set[str]:
         print(f"[risk_guardian] {name}({code}) 감시 중 — "
               f"현재가: {current_price:,}원 {profit_str} "
               f"| 평균가: {avg_str} "
-              f"| 손절가: {stop_loss_price_val:,}원 "
+              f"| 매도기준: {sell_trigger_str} "
               f"| 피라미딩가: {pyramid_str}")
 
         # ④ 하드 손절 먼저 확인 (최우선)
@@ -423,16 +453,15 @@ def run_guardian(balance: Optional[list] = None) -> Set[str]:
             held_codes_after_guard.discard(code)
             continue  # 이미 청산됐으므로 트레일링 스탑은 확인 불필요
 
-        # ⑤ 트레일링 스탑 확인 (지표 계산 필요) — API 속도 제한 방지
-        try:
-            time.sleep(1.0)
-            indicators   = indicator_calc.get_all_indicators(code)
-            exit_reason  = check_trailing_stop(code, current_price, pos, indicators)
-            if exit_reason:
-                place_exit_order(code, sellable_qty, exit_reason, current_price)
-                held_codes_after_guard.discard(code)
-        except Exception as e:
-            print(f"[risk_guardian] {code} 지표 계산 오류: {e}")
+        # ⑤ 트레일링 스탑 확인 (위에서 이미 계산한 indicators 재사용)
+        if indicators:
+            try:
+                exit_reason = check_trailing_stop(code, current_price, pos, indicators)
+                if exit_reason:
+                    place_exit_order(code, sellable_qty, exit_reason, current_price)
+                    held_codes_after_guard.discard(code)
+            except Exception as e:
+                print(f"[risk_guardian] {code} 트레일링 스탑 확인 오류: {e}")
 
     print("[risk_guardian] 손절·익절 감시 완료")
     return held_codes_after_guard
