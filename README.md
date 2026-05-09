@@ -126,6 +126,53 @@ python chart_updater.py               # 구글 시트 손익차트 수동 갱신
 
 ---
 
+## 텔레그램 봇으로 감시 종목 관리
+
+휴대폰 텔레그램 앱에서 봇과 채팅으로 화이트리스트·블랙리스트를 즉시 관리할 수 있습니다.
+24시간 systemd 데몬으로 운영되며, 매매 봇과는 완전히 독립된 별도 프로세스입니다.
+
+### 데몬 등록 (AWS 서버에서 1회)
+
+```bash
+sudo cp deploy/ls_telegram_listener.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ls_telegram_listener
+sudo systemctl status ls_telegram_listener      # 상태 확인
+journalctl -u ls_telegram_listener -f           # 실시간 로그
+```
+
+> ⚠️ `deploy/ls_telegram_listener.service` 안의 `User=ubuntu`는 본인 AWS 사용자명에 맞게 수정 필요할 수 있습니다 (ec2-user, admin 등).
+
+### 명령어 (휴대폰에서)
+
+**감시 종목 관리** — 즉시 `watchlist_config.json`과 `dynamic_watchlist.json` 동시 갱신
+```
+/add 005930 삼성전자       — 화이트리스트 추가
+/remove 005930             — 화이트리스트 제거
+/block 000660 SK하이닉스   — 블랙리스트 추가 (감시 제외)
+/unblock 000660            — 블랙리스트 해제
+```
+
+**조회**
+```
+/list                      — 화이트리스트 + 블랙리스트
+/watch                     — 오늘 감시 중인 종목 (점수순)
+/held                      — 보유 종목 + 평균가/수익률/손절가
+/balance                   — 계좌 잔고 (총자본/예수금/손익)
+/status                    — 시스템 상태 (각 파일 갱신 시각)
+/help                      — 명령어 안내
+```
+
+### 안전 장치
+
+- **권한 검증**: `.env`의 `TELEGRAM_CHAT_ID`와 일치하는 사용자만 명령 실행 가능
+- **침입 알림**: 권한 없는 사용자가 명령 보내면 거부 응답 + 관리자에게 알림 (1분 dedup)
+- **Atomic 쓰기**: 임시파일 → `os.replace()`로 원자적 교체 — 중간에 죽어도 파일 안 깨짐
+- **Idempotent**: 같은 명령 두 번 처리해도 부작용 없음
+- **데몬 안정성**: 명령 처리 중 예외 발생해도 데몬은 살아있음, systemd가 자동 재시작
+
+---
+
 ## 파일 구성
 
 ```
@@ -158,6 +205,13 @@ ls_hybrid_turtle/
 │   ├── sector_cache.py         — 종목 테마 캐시 관리
 │   └── daily_chart_cache.py    — 일봉 캐시 관리
 │
+├── [텔레그램 봇] (24시간 별도 데몬, 매매 봇과 독립)
+│   ├── telegram_listener.py    — 데몬 메인 루프 (10초 폴링·권한 검증·라우팅)
+│   ├── telegram_commands.py    — 명령어 핸들러 10개
+│   ├── watchlist_writer.py     — watchlist 안전 갱신 (atomic 쓰기)
+│   └── deploy/
+│       └── ls_telegram_listener.service  — systemd 서비스 정의
+│
 ├── .env.example                — 환경변수 템플릿 (이 파일을 복사해서 .env 작성)
 ├── requirements.txt            — 필요한 라이브러리 목록
 └── ls_hybrid_turtle.md         — 전략 상세 명세서
@@ -174,6 +228,7 @@ ls_hybrid_turtle/
 | `trade_ledger.json` | 전체 체결 원장 기록 |
 | `sector_cache.json` | 종목별 테마 캐시 |
 | `daily_chart_cache.json` | 일봉 캐시 |
+| `telegram_offset.json` | 텔레그램 봇 마지막 처리 메시지 ID |
 
 ---
 

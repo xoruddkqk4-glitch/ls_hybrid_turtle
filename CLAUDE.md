@@ -45,9 +45,13 @@
 ├── [SA-MODULE-ENTRY]
 │   ├── target_manager.py    — 미보유 종목 터틀 신호 갱신, unheld_stock_record.json 관리
 │   └── timer_agent.py       — 30분 안착 검증 타이머
-└── [SA-MODULE-TRADE]
-    ├── turtle_order_logic.py — 수량 계산, 피라미딩 주문 실행
-    └── risk_guardian.py      — 2N 손절 + 트레일링 스탑 모니터링
+├── [SA-MODULE-TRADE]
+│   ├── turtle_order_logic.py — 수량 계산, 피라미딩 주문 실행
+│   └── risk_guardian.py      — 2N 손절 + 트레일링 스탑 모니터링
+└── [SA-TELEGRAM-BOT] (24시간 별도 데몬, 매매 봇과 독립)
+    ├── telegram_listener.py  — 데몬 메인 루프 (10초 폴링·권한 검증·라우팅)
+    ├── telegram_commands.py  — 명령어 핸들러 10개 + dispatch
+    └── watchlist_writer.py   — watchlist_config·dynamic_watchlist 안전 갱신
 ```
 
 ## 전체 파일 목록
@@ -69,6 +73,10 @@
 | `sector_cache.py` | 종목별 테마 캐시 관리 (t1532 API, sector_cache.json) |
 | `daily_chart_cache.py` | 일봉 캐시 관리 — 09:05 1회 빌드 후 당일 재사용 |
 | `run_all.py` | 통합 배치 실행기 — 장 시간 체크 후 모든 모듈을 올바른 순서로 실행 |
+| `telegram_listener.py` | **텔레그램 봇 데몬 (24시간 systemd 운영)** — 10초 폴링, 권한 검증, 명령어 라우팅 |
+| `telegram_commands.py` | 텔레그램 명령어 핸들러 10개 (`/add`,`/remove`,`/block`,`/unblock`,`/list`,`/watch`,`/held`,`/balance`,`/status`,`/help`) |
+| `watchlist_writer.py` | `watchlist_config.json` + `dynamic_watchlist.json` 동시 안전 갱신 (atomic 쓰기, idempotent) |
+| `deploy/ls_telegram_listener.service` | 텔레그램 데몬 systemd 서비스 정의 |
 | `test_dummy_trade.py` | 더미 체결 기록 테스트 스크립트 (개발·검증 전용, 실계좌 무관) |
 | `.env` | API 키·계좌·텔레그램·Google 설정 (커밋 금지) |
 | `.env.example` | 환경변수 템플릿 (`.env` 작성 참고용) |
@@ -86,6 +94,7 @@
 | `trade_ledger.json` | 체결 원장 전체 기록 |
 | `sector_cache.json` | 종목별 테마 캐시 (t1532 API 결과) |
 | `daily_chart_cache.json` | 일봉(60개) 캐시 — 09:05 market_open 직후 생성 |
+| `telegram_offset.json` | 텔레그램 봇이 마지막으로 처리한 update_id (재시작 시 중복 처리 방지) |
 
 **서브에이전트 실행 순서 (구현 시):**  
 SA-SCREENER 완료 → SA-FOUNDATION 완료 → SA-MODULE-ENTRY · SA-MODULE-TRADE 병렬
@@ -104,13 +113,14 @@ SA-SCREENER 완료 → SA-FOUNDATION 완료 → SA-MODULE-ENTRY · SA-MODULE-TRA
 **수동 조정 (`watchlist_config.json`):**
 ```json
 {
-  "whitelist": ["005930", "034020"],
-  "blacklist": ["000000"]
+  "whitelist": [{"code": "005930", "name": "삼성전자"}],
+  "blacklist": [{"code": "000000", "name": "예시"}]
 }
 ```
 - `whitelist`: 자동 선정 결과와 무관하게 강제 포함 (score=1.0)
 - `blacklist`: 자동 선정됐더라도 강제 제외
 - 파일이 없으면 자동 선정 결과만 사용
+- **텔레그램 봇으로 즉시 추가/제거 가능**: `/add CODE NAME`·`/remove CODE`·`/block CODE NAME`·`/unblock CODE` (다음 09:05 배치까지 기다리지 않고 즉시 `dynamic_watchlist.json`까지 갱신됨)
 
 **자동 제외 조건 (API 비트마스크 + 코드 후처리):**
 - ETF·ETN·관리종목·투자경고·투자위험·우선주 → API 파라미터로 제거
@@ -194,6 +204,8 @@ SA-SCREENER 완료 → SA-FOUNDATION 완료 → SA-MODULE-ENTRY · SA-MODULE-TRA
 
 ## 실행 (배치 예시)
 
+### 매매 봇 (crontab 또는 수동 실행)
+
 ```bash
 cd ls_hybrid_turtle
 python stock_screener.py premarket    # 08:40 — 후보 선별 (stock_candidates.json)
@@ -206,11 +218,42 @@ python risk_guardian.py               # 손절·익절 감시
 python run_all.py                     # 모든 단계 자동 실행 (스크리너 포함)
 ```
 
+### 텔레그램 봇 데몬 (24시간 systemd 운영, 매매 봇과 별개 프로세스)
+
+```bash
+# 최초 1회 — systemd 서비스 등록
+sudo cp deploy/ls_telegram_listener.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ls_telegram_listener
+
+# 운영 명령
+sudo systemctl status ls_telegram_listener   # 상태 확인
+sudo systemctl restart ls_telegram_listener  # 재시작
+journalctl -u ls_telegram_listener -f        # 실시간 로그
+```
+
+### 텔레그램 명령어 (휴대폰 앱에서)
+
+| 명령 | 동작 |
+|------|------|
+| `/add CODE NAME` | 화이트리스트 추가 (예: `/add 005930 삼성전자`) |
+| `/remove CODE` | 화이트리스트 제거 |
+| `/block CODE NAME` | 블랙리스트 추가 (감시 제외) |
+| `/unblock CODE` | 블랙리스트 해제 |
+| `/list [white\|black]` | 화이트/블랙리스트 표시 |
+| `/watch` | 오늘 감시 중인 종목 (점수순) |
+| `/held` | 보유 종목 + 평균가/수익률/손절가 |
+| `/balance` | 계좌 잔고 (총자본/예수금/손익) |
+| `/status` | 시스템 상태 |
+| `/help` | 명령어 안내 |
+
+권한 검증: `.env`의 `TELEGRAM_CHAT_ID`와 일치하는 사용자만 실행 가능. 권한 없는 사용자는 거부 응답 + 관리자에게 침입 알림 (1분 dedup).
+
 ---
 
 **구현 상세(진입 수식·수량 계산·손절 로직·JSON 필드)는 모두 `ls_hybrid_turtle.md`에 있다.**
 
 ---
 
-> 마지막 업데이트: 2026-05-06 (240분봉·동적 목표가(pending_target) 제거 — 매매에 안 쓰이는 죽은 코드 정리)
+> 마지막 업데이트: 2026-05-09 (텔레그램 봇 감시 종목 관리 시스템 추가 — `/add` `/remove` `/block` `/unblock` 등 10개 명령어, 24시간 systemd 데몬, 즉시 반영)
 

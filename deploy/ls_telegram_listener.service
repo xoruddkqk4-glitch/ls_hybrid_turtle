@@ -1,0 +1,21 @@
+[Unit]
+Description=LS Hybrid Turtle Telegram Listener
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/var/autobot/ls_hybrid_turtle
+ExecStart=/usr/bin/python3 /var/autobot/ls_hybrid_turtle/telegram_listener.py
+Restart=on-failure
+RestartSec=10
+# 표준 출력/에러를 systemd journal 로 보냄 (journalctl 로 조회 가능)
+StandardOutput=journal
+StandardError=journal
+# 한국어 출력을 위한 UTF-8 강제
+Environment=PYTHONIOENCODING=utf-8
+Environment=LANG=ko_KR.UTF-8
+
+[Install]
+WantedBy=multi-user.target
