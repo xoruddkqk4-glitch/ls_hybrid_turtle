@@ -676,6 +676,14 @@ if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "premarket"
 
     if mode == "market_open":
+        # 휴장일(공휴일) 확인 — 거래일이 아니면 감시 종목을 새로 뽑지 않고 종료한다.
+        # (09:05 배치는 장이 열린 뒤라 '오늘 봉 유무'로 정확히 판별된다.
+        #  08:40 premarket 배치는 장 전이라 판별이 안 되므로 건드리지 않는다.)
+        if not ls_client.is_trading_day():
+            msg = "📅 오늘은 휴장일(공휴일)입니다 → 감시 종목 선정을 건너뜁니다."
+            print(f"[screener] {msg}")
+            SendMessage(msg)
+            sys.exit(0)   # 오류가 아니라 정상 종료(0)
         run_market_open_screening()
     else:
         run_premarket_screening()
