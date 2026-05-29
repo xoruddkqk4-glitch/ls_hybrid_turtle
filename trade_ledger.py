@@ -385,6 +385,49 @@ def get_today_realized_pnl() -> int:
     return total
 
 
+def order_already_recorded(stock_code: str, order_no: str) -> bool:
+    """같은 종목코드 + 주문번호가 오늘 날짜로 이미 원장에 기록돼 있는지 확인한다.
+
+    수동 매매 체결을 기록할 때 중복을 막기 위해 사용한다.
+    봇이 직접 낸 주문도 원장에 같은 order_no로 들어 있으므로,
+    이 함수로 걸러내면 "봇 자기 주문 재기록"과 "재실행 시 중복 기록"을 모두 막을 수 있다.
+
+    Args:
+        stock_code: 종목코드 6자리
+        order_no:   LS 주문번호
+
+    Returns:
+        True  — 이미 기록됨 (건너뛰어야 함)
+        False — 기록 없음 (새로 기록 가능)
+                order_no가 빈 값이면 판단할 수 없으므로 False를 반환한다.
+    """
+    # 주문번호가 없으면 중복 판단 불가 → False (호출하는 쪽에서 기록 여부 결정)
+    if not order_no:
+        return False
+
+    if not os.path.exists(LEDGER_FILE):
+        return False
+
+    try:
+        with open(LEDGER_FILE, "r", encoding="utf-8") as f:
+            records = json.load(f)
+        if not isinstance(records, list):
+            return False
+    except (json.JSONDecodeError, IOError):
+        return False
+
+    today_str = datetime.now(KST).strftime("%Y-%m-%d")
+    for rec in records:
+        # 오늘 날짜 + 같은 종목 + 같은 주문번호이면 이미 기록된 것
+        if (
+            rec.get("stock_code") == stock_code
+            and str(rec.get("order_no", "")) == str(order_no)
+            and rec.get("ts_kst", "").startswith(today_str)
+        ):
+            return True
+    return False
+
+
 def _load_daily_snapshot() -> dict:
     """daily_snapshot.json을 읽어 반환한다.
 

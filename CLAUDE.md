@@ -68,7 +68,7 @@
 | `timer_agent.py` | 30분 가드 타이머 (가짜 돌파 필터) |
 | `turtle_order_logic.py` | 리스크 기반 Unit 수량 계산, 피라미딩 주문, 예외 진입 처리 |
 | `risk_guardian.py` | 2N 하드 손절 및 트레일링 스탑 실시간 감시 |
-| `balance_sync.py` | 실행 시작 시 실제 잔고 ↔ held_stock_record.json 동기화 — 수동 매수 종목 발견 시 1회 알림 후 자동 편입 (매도 전략만 감시) |
+| `balance_sync.py` | 실행 시작 시 실제 잔고 ↔ held_stock_record.json 동기화 — 수동 매수 종목 발견 시 1회 알림 후 자동 편입 (매도 전략만 감시). 잔고 불일치 종목은 `ls_client.get_today_executions()`(t0425)로 당일 체결을 받아와 원장에 없는 것만 `MANUAL_SYNC`로 기록 (매도는 수익률·수익금 계산, order_no로 중복 방지) |
 | `chart_updater.py` | 구글 시트 "포트폴리오 추이" 데이터로 "손익차트" 탭에 콤보 차트(일일 막대 + 누적 선) 자동 생성 |
 | `sector_cache.py` | 종목별 테마 캐시 관리 (t1532 API, sector_cache.json) |
 | `daily_chart_cache.py` | 일봉 캐시 관리 — 09:05 1회 빌드 후 당일 재사용 |
@@ -255,5 +255,5 @@ journalctl -u ls_telegram_listener -f        # 실시간 로그
 
 ---
 
-> 마지막 업데이트: 2026-05-09 (텔레그램 봇 감시 종목 관리 시스템 추가 — `/add` `/remove` `/block` `/unblock` 등 10개 명령어, 24시간 systemd 데몬, 즉시 반영)
+> 마지막 업데이트: 2026-05-29 (수동 매수·매도 체결도 원장 자동 기록 — 실행 시작 시 잔고 불일치 종목의 당일 체결을 t0425로 받아와 `MANUAL_SYNC`로 기록, order_no로 중복 방지)
 

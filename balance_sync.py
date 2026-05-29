@@ -24,6 +24,7 @@ from typing import Optional
 
 import indicator_calc
 import ls_client
+import trade_ledger
 from telegram_alert import SendMessage
 
 # held_stock_record.json 파일 경로 (스크립트 위치 기준 절대 경로)
@@ -58,6 +59,75 @@ def _save_held(state: dict):
             json.dump(state, f, ensure_ascii=False, indent=2)
     except IOError as e:
         print(f"[balance_sync] held_stock_record.json 저장 오류: {e}")
+
+
+# ─────────────────────────────────────────
+# 수동 체결 원장 기록
+# ─────────────────────────────────────────
+
+def _record_manual_executions(code: str, name: str, avg_buy_price: float = 0):
+    """잔고가 안 맞는 종목의 '당일 체결'을 조회해, 원장에 없는 것만 기록한다.
+
+    수동으로 사고판(HTS·MTS) 체결을 체결 원장(구글시트)에 남기기 위한 함수.
+
+    동작:
+        ① ls_client.get_today_executions(code)로 그 종목의 당일 체결을 가져온다.
+        ② 체결 하나하나에 대해, 같은 주문번호가 이미 원장에 있으면 건너뛴다.
+           (봇이 직접 낸 주문·이전 실행에서 이미 기록한 수동 체결을 중복 방지)
+        ③ 없는 체결만 MANUAL_SYNC로 원장에 기록한다.
+           매도(SELL)이고 평균매입가를 알면 수익률·수익금도 함께 계산한다.
+
+    Args:
+        code:          종목코드 6자리
+        name:          종목명 (체결 조회 API가 이름을 안 주므로 외부에서 전달)
+        avg_buy_price: 평균 매입가 (매도 수익 계산용). 0이면 수익 계산 생략.
+
+    이 함수는 조회·기록만 하며 어떤 주문도 내지 않는다.
+    오류가 나도 동기화 전체가 멈추지 않도록 예외를 안에서 삼킨다.
+    """
+    try:
+        executions = ls_client.get_today_executions(code)
+    except Exception as e:
+        print(f"[balance_sync] {name}({code}) 당일 체결 조회 실패: {e} → 원장 기록 건너뜀")
+        return
+
+    recorded = 0  # 이번에 새로 기록한 체결 수
+    for ex in executions:
+        order_no = ex.get("order_no", "")
+
+        # 이미 기록된 주문이면 건너뜀 (봇 주문·중복 실행 방지)
+        if trade_ledger.order_already_recorded(code, order_no):
+            continue
+
+        side  = ex.get("side", "BUY")
+        qty   = int(ex.get("qty", 0))
+        price = int(ex.get("price", 0))
+        if qty <= 0 or price <= 0:
+            continue  # 비정상 데이터 방어
+
+        # 원장 기록용 record 구성 (trade_ledger가 record_id·수수료 등 자동 채움)
+        record = {
+            "side":       side,
+            "stock_code": code,
+            "stock_name": name,
+            "qty":        qty,
+            "unit_price": price,
+            "order_no":   order_no,
+            "order_type": "MANUAL",       # 수동 매매 표시
+            "source":     "MANUAL_SYNC",  # 수동 동기화 구분값
+            "note":       "수동 매매 자동 기록",
+        }
+
+        # 매도이고 평균매입가를 알면 수익률·수익금 계산
+        if side == "SELL" and avg_buy_price and avg_buy_price > 0:
+            record["profit_amount"] = int((price - avg_buy_price) * qty)
+            record["profit_rate"]   = round((price - avg_buy_price) / avg_buy_price * 100, 2)
+
+        trade_ledger.append_trade(record)
+        recorded += 1
+
+    if recorded:
+        print(f"[balance_sync] {name}({code}) 수동 체결 {recorded}건을 원장에 기록했습니다.")
 
 
 # ─────────────────────────────────────────
@@ -108,6 +178,10 @@ def run_balance_sync(actual_list: Optional[list] = None) -> bool:
 
     changed = False  # 변경사항 발생 여부
 
+    # 잔고가 안 맞는 종목 → 나중에 당일 체결을 조회해 원장에 기록할 대상
+    # (code, name, avg_buy_price) 형태. 평균매입가는 매도 수익 계산용.
+    to_record = []
+
     # ─────────────────────────────────────
     # ① 기록엔 있는데 실제로 없는 종목 → 기록 삭제
     # ─────────────────────────────────────
@@ -119,6 +193,12 @@ def run_balance_sync(actual_list: Optional[list] = None) -> bool:
         )
         print(f"[balance_sync] {msg}")
         SendMessage(msg)
+        # 기록 삭제 전에 종목명·평균매입가를 확보 (수동 매도 수익 계산용)
+        to_record.append((
+            code,
+            held[code].get("stock_name", code),
+            held[code].get("avg_buy_price", 0),
+        ))
         del held[code]
         changed = True
 
@@ -162,6 +242,9 @@ def run_balance_sync(actual_list: Optional[list] = None) -> bool:
             }
             changed = True
 
+            # 수동 매수 종목 → 당일 매수 체결을 원장에 기록 (매수라 수익 계산 불필요 → avg=0)
+            to_record.append((code, name, 0))
+
             # 알림은 최초 편입 시 1회만 전송 (다음 실행부터는 held에 있으므로 이 블록 진입 안 함)
             stop_msg = (
                 f" | 손절가: {stop_loss_price:,}원" if stop_loss_price > 0
@@ -191,6 +274,8 @@ def run_balance_sync(actual_list: Optional[list] = None) -> bool:
             )
             print(f"[balance_sync] {msg}")
             SendMessage(msg)
+            # 수량이 바뀐 종목 → 당일 체결을 원장에 기록 (매도분이면 평균매입가로 수익 계산)
+            to_record.append((code, actual[code]["name"], held[code].get("avg_buy_price", 0)))
             held[code]["total_qty"] = actual_qty
             changed = True
 
@@ -202,5 +287,12 @@ def run_balance_sync(actual_list: Optional[list] = None) -> bool:
         print("[balance_sync] held_stock_record.json 저장 완료.")
     else:
         print("[balance_sync] 불일치 없음. 동기화 완료.")
+
+    # ─────────────────────────────────────
+    # 잔고가 안 맞았던 종목들의 당일 체결을 원장(구글시트)에 기록
+    # (수동 매수·매도 체결을 남기기 위함. 이미 기록된 주문은 자동으로 건너뜀)
+    # ─────────────────────────────────────
+    for code, name, avg_buy_price in to_record:
+        _record_manual_executions(code, name, avg_buy_price)
 
     return True

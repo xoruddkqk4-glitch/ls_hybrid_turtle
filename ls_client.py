@@ -20,6 +20,7 @@ from programgarden_finance.ls.korea_stock.market.t8407.blocks import T8407InBloc
 from programgarden_finance.ls.korea_stock.chart.t8451.blocks import T8451InBlock
 from programgarden_finance.ls.korea_stock.order.CSPAT00601.blocks import CSPAT00601InBlock1
 from programgarden_finance.ls.korea_stock.accno.t0424.blocks import T0424InBlock
+from programgarden_finance.ls.korea_stock.accno.t0425.blocks import T0425InBlock
 from programgarden_finance.ls.korea_stock.sector.t1532.blocks import T1532InBlock
 from programgarden_finance.ls.korea_stock.ranking.t1463.blocks import T1463InBlock
 from programgarden_finance.ls.korea_stock.market.t1442.blocks import T1442InBlock
@@ -279,6 +280,126 @@ def get_holding_qty(code: str, balance: list = None) -> int:
         if item.get("code") == code:
             return int(item.get("qty", 0))
     return 0
+
+
+def get_today_executions(code: str = "") -> list:
+    """오늘 '체결된' 주문 내역을 조회한다 (t0425 주식 체결/미체결).
+
+    수동 매매(사람이 HTS·MTS로 직접 사고팖)로 생긴 체결을 찾아
+    체결 원장에 기록하기 위해 사용한다.
+
+    Args:
+        code: 종목코드 6자리. 빈 문자열("")이면 전체 종목 조회.
+
+    Returns:
+        오늘 체결된 주문 리스트.
+        [
+            {
+                "code":     "005930",   # 종목코드 6자리
+                "side":     "BUY",      # "BUY"(매수) / "SELL"(매도)
+                "qty":      10,         # 실제 체결 수량 (주)
+                "price":    75000,      # 체결 단가 (원, 평균 체결가)
+                "order_no": "12345",    # LS 주문번호 (당일 고유 — 중복 방지 키)
+                "ord_time": "100530",   # 주문 시각 (HHMMSS)
+            },
+            ...
+        ]
+        체결이 없거나 조회 실패 시 빈 리스트.
+
+    주의:
+        - t0425는 '당일' 체결만 돌려준다. 전날 체결은 잡지 못한다.
+        - 봇이 직접 낸 주문도 함께 나오므로, 중복 기록 방지는 호출하는 쪽
+          (balance_sync)에서 order_no로 거른다.
+    """
+    _check_login()
+
+    result   = []
+    cts_ordno = ""   # 연속조회키 (최초 빈 값)
+
+    # 무한 루프 방지: 최대 페이지 수 상한
+    _MAX_PAGES   = 20   # 하루 체결이 페이지당 수십 건이므로 20페이지면 충분
+    _MAX_RETRIES = 3    # 호출 제한(HTTP 500) 시 재시도 횟수
+    _RETRY_WAIT  = 10.0 # 재시도 대기 시간 (초)
+
+    try:
+        page = 0
+        while True:
+            page += 1
+            if page > _MAX_PAGES:
+                print(f"[ls_client] t0425 최대 페이지({_MAX_PAGES}) 도달 → 조회 중단")
+                break
+
+            # ── 재시도 루프 (호출 제한 대비) ──────────────────
+            resp = None
+            for attempt in range(_MAX_RETRIES):
+                try:
+                    resp = _ls.korea_stock().accno().t0425(
+                        T0425InBlock(
+                            expcode=code,      # 종목코드 (빈 값이면 전체)
+                            chegb="1",         # 체결 구분: 1=체결된 것만
+                            medosu="0",         # 매도/매수 구분: 0=전체
+                            sortgb="2",         # 정렬: 주문번호 오름차순
+                            cts_ordno=cts_ordno,  # 연속조회키
+                        )
+                    ).req()
+                    break  # 성공 시 재시도 루프 탈출
+
+                except Exception as e:
+                    err_str = str(e)
+                    is_rate_limit = "500" in err_str or "호출 거래건수" in err_str
+                    if is_rate_limit and attempt < _MAX_RETRIES - 1:
+                        print(
+                            f"[ls_client] t0425 호출 제한 오류 → "
+                            f"{_RETRY_WAIT:.0f}초 후 재시도 "
+                            f"({attempt + 1}/{_MAX_RETRIES}): {err_str}"
+                        )
+                        time.sleep(_RETRY_WAIT)
+                    else:
+                        raise
+            # ──────────────────────────────────────────────────
+
+            if resp is None or not resp.block:
+                # 더 이상 체결 내역 없음
+                break
+
+            for item in resp.block:
+                # 종목코드 정규화 (모의투자 응답에서 "A005930" 형태 가능)
+                row_code = item.expcode.strip()
+                if row_code.startswith("A"):
+                    row_code = row_code[1:]
+
+                # 실제 체결된 수량(cheqty)이 0이면 건너뜀 (미체결·취소분)
+                che_qty = int(item.cheqty or 0)
+                if che_qty <= 0:
+                    continue
+
+                # medosu: "1"=매도, "2"=매수
+                side = "SELL" if str(item.medosu).strip() == "1" else "BUY"
+
+                result.append({
+                    "code":     row_code,
+                    "side":     side,
+                    "qty":      che_qty,
+                    "price":    int(item.cheprice or 0),
+                    "order_no": str(item.ordno).strip(),
+                    "ord_time": str(getattr(item, "ordtime", "")).strip(),
+                })
+
+            # 연속조회: cont_block.cts_ordno가 있으면 다음 페이지, 없으면 종료
+            next_cts = getattr(resp.cont_block, "cts_ordno", "") if resp.cont_block else ""
+            if next_cts and str(next_cts).strip():
+                cts_ordno = str(next_cts).strip()
+                time.sleep(1.0)  # 연속 페이지 조회 간 대기
+            else:
+                break
+
+        target = code if code else "전체"
+        print(f"[ls_client] 당일 체결 조회 완료: {len(result)}건 ({target}, {page}페이지)")
+        return result
+
+    except Exception as e:
+        print(f"[ls_client] 당일 체결 조회 오류: {e}")
+        return []
 
 
 def wait_for_order_fill(
