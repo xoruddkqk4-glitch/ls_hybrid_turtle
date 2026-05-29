@@ -3,7 +3,7 @@
 **Claude Code 세션은 본 파일만으로 시작한다.**
 
 **이 프로젝트가 다루는 것:** LS증권 API를 이용한 **국내 상장 주식(KRX) 자동매매 시스템**.  
-매매 전략: **오리지널 터틀 트레이딩** (신고가 돌파 + 30분 가드 + 10시 이후 진입).  
+매매 전략: **오리지널 터틀 트레이딩** (신고가 돌파 + 풀백 재돌파 + 10시 이후 진입).  
 **상세 전략 명세:** `ls_hybrid_turtle.md` 참고.
 
 ---
@@ -44,7 +44,7 @@
 │   └── config.py            — get_watchlist() (dynamic_watchlist.json 경유)
 ├── [SA-MODULE-ENTRY]
 │   ├── target_manager.py    — 미보유 종목 터틀 신호 갱신, unheld_stock_record.json 관리
-│   └── timer_agent.py       — 30분 안착 검증 타이머
+│   └── timer_agent.py       — 풀백 재돌파 진입 신호 체크
 ├── [SA-MODULE-TRADE]
 │   ├── turtle_order_logic.py — 수량 계산, 피라미딩 주문 실행
 │   └── risk_guardian.py      — 2N 손절 + 트레일링 스탑 모니터링
@@ -64,8 +64,8 @@
 | `trade_ledger.py` | 체결 원장 기록 + Google Sheets 동기화 — 매도 체결 시 '포트폴리오 추이'·'손익차트' 시트 자동 갱신 |
 | `telegram_alert.py` | 텔레그램 알림 단일 모듈 |
 | `config.py` | `get_watchlist()` — `dynamic_watchlist.json`을 읽어 감시 종목 반환 |
-| `target_manager.py` | 미보유 종목 터틀 신호(`turtle_s1/s2_signal`) 및 돌파 시각(`turtle_s1/s2_breakout_since`) 갱신 |
-| `timer_agent.py` | 30분 가드 타이머 (가짜 돌파 필터) |
+| `target_manager.py` | 미보유 종목 터틀 신호(`turtle_s1/s2_signal`) 및 풀백 상태(`peak_price·peak_locked·entry_ready`) 갱신 |
+| `timer_agent.py` | 풀백 재돌파 진입 신호 체크 (`entry_ready` + 10시 필터) |
 | `turtle_order_logic.py` | 리스크 기반 Unit 수량 계산, 피라미딩 주문, 예외 진입 처리 |
 | `risk_guardian.py` | 2N 하드 손절 및 트레일링 스탑 실시간 감시 |
 | `balance_sync.py` | 실행 시작 시 실제 잔고 ↔ held_stock_record.json 동기화 — 수동 매수 종목 발견 시 1회 알림 후 자동 편입 (매도 전략만 감시). 잔고 불일치 종목은 `ls_client.get_today_executions()`(t0425)로 당일 체결을 받아와 원장에 없는 것만 `MANUAL_SYNC`로 기록 (매도는 수익률·수익금 계산, order_no로 중복 방지) |
@@ -89,7 +89,7 @@
 | `stock_candidates.json` | 08:40 배치 후보 종목 (스코어·지표 포함) |
 | `dynamic_watchlist.json` | 09:05 배치 최종 감시 종목 50개 — 모든 모듈이 이 파일을 참조 |
 | `watchlist_config.json` | 수동 화이트리스트/블랙리스트 (없으면 자동 선정만 사용) |
-| `unheld_stock_record.json` | 미보유 종목의 터틀 신호(`turtle_s1/s2_signal`)·돌파 시각(`turtle_s1/s2_breakout_since`) |
+| `unheld_stock_record.json` | 미보유 종목의 터틀 신호(`turtle_s1/s2_signal`)·풀백 상태(`peak_price·peak_locked·entry_ready`) |
 | `held_stock_record.json` | 보유 종목의 Unit 수·마지막 매수가·손절가·피라미딩 트리거가·종목별 유효 리스크팩터(`effective_risk_factor`) |
 | `trade_ledger.json` | 체결 원장 전체 기록 |
 | `sector_cache.json` | 종목별 테마 캐시 (t1532 API 결과) |
@@ -132,8 +132,8 @@ SA-SCREENER 완료 → SA-FOUNDATION 완료 → SA-MODULE-ENTRY · SA-MODULE-TRA
 
 ### 진입 (Entry)
 - **터틀 신고가 돌파**: 20일 신고가(S1) 또는 55일 신고가(S2) 돌파 시 진입 후보
-- **30분 가드**: 돌파 발생 시각(`turtle_s1/s2_breakout_since`)으로부터 장중 30분 이상 경과 **AND** 현재 시각 10:00 이상 → 1차 Unit 매수
-  - 9시대 돌파도 시각은 즉시 기록되며, 10:00 도달 시 이미 30분 경과면 즉시 진입
+- **풀백 재돌파**: 돌파 후 최고값(`peak_price`) 형성 → 눌림(`peak_locked=True`) → 최고값 재돌파(`entry_ready=True`) **AND** 현재 시각 10:00 이상 → 1차 Unit 매수
+  - 돌파 후 가격이 최고점에서 한 번 눌린 뒤 다시 그 최고점을 뚫을 때만 진입 (가짜 돌파 필터)
   - S1·S2 동시 해당 시 TURTLE_S2 우선 (55일 > 20일)
 
 ### 포지션 사이징 및 피라미딩
@@ -211,7 +211,7 @@ cd ls_hybrid_turtle
 python stock_screener.py premarket    # 08:40 — 후보 선별 (stock_candidates.json)
 python stock_screener.py market_open  # 09:05 — 최종 50개 확정 (dynamic_watchlist.json)
 python target_manager.py              # 미보유 종목 터틀 신호 갱신
-python timer_agent.py                 # 30분 가드 체크
+python timer_agent.py                 # 풀백 재돌파 진입 신호 체크
 python turtle_order_logic.py          # 진입·피라미딩 주문
 python risk_guardian.py               # 손절·익절 감시
 # 또는
@@ -255,5 +255,5 @@ journalctl -u ls_telegram_listener -f        # 실시간 로그
 
 ---
 
-> 마지막 업데이트: 2026-05-29 (수동 매수·매도 체결도 원장 자동 기록 — 실행 시작 시 잔고 불일치 종목의 당일 체결을 t0425로 받아와 `MANUAL_SYNC`로 기록, order_no로 중복 방지)
+> 마지막 업데이트: 2026-05-29 (터틀 진입 필터 교체 — 30분 가드 제거, 풀백 재돌파(눌림→최고값 재돌파)로 전환. `unheld_stock_record.json`에 peak_price·peak_locked·entry_ready 필드 추가, breakout_since 필드 제거)
 

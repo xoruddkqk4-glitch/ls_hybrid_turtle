@@ -121,7 +121,7 @@ def check_hard_stop(code: str, current_price: int, pos: dict) -> bool:
             now_hhmm = datetime.now(_KST).hour * 100 + datetime.now(_KST).minute
             period   = "장 시작 직후(09:00~09:30)" if now_hhmm < 1000 else "장 마감 직전(15:00~15:30)"
             msg = (
-                f"⚠️ 2N 손절 조건 발동 (보류 중)\n"
+                f"[!] 2N 손절 조건 발동 (보류 중)\n"
                 f"종목: {name}({code})\n"
                 f"현재가: {current_price:,}원 ≤ 손절가: {stop_loss_price:,}원\n"
                 f"사유: {period} 변동성 시간대({now_str}) — 다음 회차에 재확인"
@@ -130,8 +130,8 @@ def check_hard_stop(code: str, current_price: int, pos: dict) -> bool:
             return False  # 이번 회차는 손절하지 않음
 
         # 보류 시간대가 아니면 정상적으로 손절 발동
-        print(f"[risk_guardian] {name}({code}) ❌ 하드 손절 발동! "
-              f"현재가 {current_price:,}원 ≤ 손절가 {stop_loss_price:,}원")
+        print(f"[risk_guardian] {name}({code}) [STOP] 하드 손절 발동! "
+              f"현재가 {current_price:,}원 <= 손절가 {stop_loss_price:,}원")
         return True
 
     return False
@@ -297,7 +297,7 @@ def place_exit_order(code: str, qty: int, reason: str, current_price: int = 0):
 
     # ⑤ 텔레그램 알림 (손절과 익절 이모지 구분 — 실제 수익률 기준)
     is_loss = profit_rate < 0
-    emoji = "🔴" if is_loss else "💰"
+    emoji = "[-]" if is_loss else "[+]"
     profit_sign  = "+" if profit_rate >= 0 else ""
     amount_sign  = "+" if profit_amount >= 0 else ""
 
@@ -388,8 +388,8 @@ def run_guardian(balance: Optional[list] = None) -> Set[str]:
         name = str(item.get("name") or "").strip() or _get_stock_name(code)
 
         if code not in watchlist:
-            print(f"[risk_guardian] {name}({code}) ⚠️ 감시 목록에서 제외됐지만 보유 중 "
-                  f"→ 손절·익절 감시 계속")
+            print(f"[risk_guardian] {name}({code}) [!] 감시 목록에서 제외됐지만 보유 중 "
+                  f"- 손절·익절 감시 계속")
 
         # 평균가/피라미딩가/수익률/수익금을 함께 표시 (한눈에 포지션 상태 파악)
         avg_buy_price       = pos.get("avg_buy_price", 0)
@@ -441,7 +441,7 @@ def run_guardian(balance: Optional[list] = None) -> Set[str]:
         avg_str     = f"{avg_buy_price:,}원" if avg_buy_price > 0 else "N/A"
         pyramid_str = f"{next_pyramid_price:,}원" if next_pyramid_price > 0 else "N/A"
 
-        print(f"[risk_guardian] {name}({code}) 감시 중 — "
+        print(f"[risk_guardian] {name}({code}) 감시 중 - "
               f"현재가: {current_price:,}원 {profit_str} "
               f"| 평균가: {avg_str} "
               f"| 매도기준: {sell_trigger_str} "

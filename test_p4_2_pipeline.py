@@ -8,20 +8,21 @@
 #            timer_agent.run_timer_check() 순서로 데이터가 올바르게 흐르는지 확인
 #
 # 검증 항목:
-#   [1] run_update() — 새 종목 등록 시 breakout_since 기록 여부
-#   [2] run_update() x2 — 두 번 호출해도 기존 타임스탬프를 보존하는지
-#   [3] run_update() — S1 신호가 꺼지면 breakout_since 초기화되는지
-#   [4] 전체 파이프라인 — run_update() → run_timer_check() → S1 신호 발생
-#   [5] 전체 파이프라인 — S1+S2 동시 신호 시 TURTLE_S2 우선
-#   [6] 전체 파이프라인 — 10시 이전이면 신호 없음
+#   [1] run_update() — 최초 돌파 시 peak_price 기록, peak_locked=False
+#   [2] run_update() x2 — 가격 하락 시 peak_locked=True (PULLBACK 전환)
+#   [3] run_update() x3 — 최고값 재돌파 시 entry_ready=True
+#   [4] run_update() — 신호 소멸 시 peak 전체 초기화
+#   [5] 전체 파이프라인 — run_update() × 3 → run_timer_check() → S1 신호 발생
+#   [6] 전체 파이프라인 — S1+S2 동시 신호 시 TURTLE_S2 우선
+#   [7] 전체 파이프라인 — 10시 이전이면 신호 없음
 
 import sys
 import json
 import os
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime
 import unittest
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 
 import pytz
 
@@ -41,12 +42,12 @@ KST = pytz.timezone("Asia/Seoul")
 _DATE = (2026, 4, 27)
 FIXED_1030 = KST.localize(datetime(*_DATE, 10, 30, 0))  # 10:30
 FIXED_0950 = KST.localize(datetime(*_DATE,  9, 50, 0))  # 09:50 (10시 이전)
-FIXED_1000 = KST.localize(datetime(*_DATE, 10,  0, 0))  # 10:00
 
 # ── 감시 종목 (테스트 전용) ───────────────────────────────────
 WATCHLIST = {"035420": {"name": "NAVER", "score": 0.9}}
 CODE = "035420"
-CURRENT_PRICE = 50_000   # 현재가 5만원
+S1_HIGH = 48_000   # 20일 신고가 (현재가가 이보다 높으면 S1 True)
+S2_HIGH = 60_000   # 55일 신고가 (현재가가 이보다 높으면 S2 True)
 
 
 def _make_indicator_side_effect(s1_high: int, s2_high: int):
@@ -56,19 +57,15 @@ def _make_indicator_side_effect(s1_high: int, s2_high: int):
     return _fn
 
 
-def _run_update_with_mocks(
-    tmp_json_path: str,
-    s1_high: int,
-    s2_high: int,
-    fixed_now: datetime,
-):
+def _run_update_with_mocks(tmp_json_path: str, current_price: int,
+                           s1_high: int = S1_HIGH, s2_high: int = S2_HIGH):
     """
     target_manager.run_update()를 실행한다.
 
     - tmp_json_path: 임시 JSON 파일 경로 (실제 IO 발생)
-    - s1_high: 20일 신고가 (CURRENT_PRICE > s1_high 이면 S1 True)
-    - s2_high: 55일 신고가 (CURRENT_PRICE > s2_high 이면 S2 True)
-    - fixed_now: datetime.now(KST)를 대체할 고정 시각
+    - current_price: 조회될 현재가
+    - s1_high: 20일 신고가
+    - s2_high: 55일 신고가
     """
     dummy_candles = [{"open": 0, "high": 0, "low": 0, "close": 0, "volume": 0}] * 60
 
@@ -76,16 +73,13 @@ def _run_update_with_mocks(
          patch("target_manager.get_watchlist",       return_value=WATCHLIST), \
          patch("target_manager.ls_client.get_balance", return_value=[]), \
          patch("target_manager.ls_client.get_multi_price",
-               return_value={CODE: CURRENT_PRICE}), \
+               return_value={CODE: current_price}), \
          patch("target_manager.daily_chart_cache.get_daily_cached",
                return_value=dummy_candles), \
          patch("target_manager.daily_chart_cache.update_daily_cache"), \
          patch("target_manager.indicator_calc.calc_n_day_high",
                side_effect=_make_indicator_side_effect(s1_high, s2_high)), \
-         patch("target_manager.time.sleep"), \
-         patch("target_manager.datetime") as mock_dt:
-        mock_dt.now.return_value = fixed_now
-        mock_dt.now.side_effect  = None
+         patch("target_manager.time.sleep"):
         target_manager.run_update()
 
 
@@ -98,97 +92,8 @@ def _load_tmp(path: str) -> dict:
 
 
 # ══════════════════════════════════════════════════════════
-class TestRunUpdateBreakoutSince(unittest.TestCase):
-    """run_update() — breakout_since 기록·보존·초기화 검증"""
-
-    def setUp(self):
-        # 매 테스트마다 깨끗한 임시 파일 생성
-        fd, self.tmp = tempfile.mkstemp(suffix=".json")
-        os.close(fd)
-        os.unlink(self.tmp)   # 빈 상태에서 시작 (파일 없음)
-
-    def tearDown(self):
-        if os.path.exists(self.tmp):
-            os.unlink(self.tmp)
-
-    # ── [1] 새 종목 — S1 첫 돌파 시 breakout_since 기록 ──────────
-
-    def test_신규종목_S1돌파_breakout_since_기록(self):
-        """새 종목이 처음 등록될 때 S1 돌파 시각이 기록되어야 한다."""
-        _run_update_with_mocks(
-            self.tmp,
-            s1_high  = 48_000,   # 현재가 50000 > 48000 → S1 True
-            s2_high  = 55_000,   # 현재가 50000 < 55000 → S2 False
-            fixed_now= FIXED_1030,
-        )
-        rec = _load_tmp(self.tmp).get(CODE, {})
-
-        self.assertTrue(rec.get("turtle_s1_signal"),  "S1 신호가 True여야 함")
-        self.assertFalse(rec.get("turtle_s2_signal"), "S2 신호가 False여야 함")
-        self.assertIsNotNone(rec.get("turtle_s1_breakout_since"),
-                             "S1 돌파 시각이 기록되어야 함")
-        self.assertIsNone(rec.get("turtle_s2_breakout_since"),
-                          "S2 돌파 시각은 None이어야 함")
-
-    def test_신규종목_S2돌파_breakout_since_기록(self):
-        """S1과 S2 모두 돌파 시 둘 다 breakout_since가 기록되어야 한다."""
-        _run_update_with_mocks(
-            self.tmp,
-            s1_high  = 48_000,   # S1 True
-            s2_high  = 48_000,   # S2 True (같은 값이면 둘 다 True)
-            fixed_now= FIXED_1030,
-        )
-        rec = _load_tmp(self.tmp).get(CODE, {})
-
-        self.assertTrue(rec.get("turtle_s1_signal"))
-        self.assertTrue(rec.get("turtle_s2_signal"))
-        self.assertIsNotNone(rec.get("turtle_s1_breakout_since"))
-        self.assertIsNotNone(rec.get("turtle_s2_breakout_since"))
-
-    # ── [2] 두 번 호출 — 기존 타임스탬프 보존 ────────────────────
-
-    def test_두번호출_타임스탬프_보존(self):
-        """
-        첫 번째 run_update()에서 기록된 breakout_since가
-        두 번째 run_update()에서 덮어써지지 않아야 한다.
-
-        (타이머가 리셋되면 30분 가드를 영원히 통과할 수 없게 됨)
-        """
-        # 1차 — 09:55에 S1 돌파 기록
-        T1 = KST.localize(datetime(*_DATE, 9, 55, 0))
-        _run_update_with_mocks(self.tmp, 48_000, 55_000, T1)
-        first_since = _load_tmp(self.tmp)[CODE]["turtle_s1_breakout_since"]
-
-        # 2차 — 10:30에 실행 (S1 여전히 True)
-        _run_update_with_mocks(self.tmp, 48_000, 55_000, FIXED_1030)
-        second_since = _load_tmp(self.tmp)[CODE]["turtle_s1_breakout_since"]
-
-        self.assertEqual(first_since, second_since,
-                         "두 번째 run_update()가 기존 breakout_since를 바꾸면 안 됨")
-
-    # ── [3] 신호 소멸 — 타임스탬프 초기화 ───────────────────────
-
-    def test_신호소멸_타임스탬프_초기화(self):
-        """
-        S1 신호가 True → False 로 바뀌면 breakout_since 가 None 으로 초기화된다.
-        (가격이 다시 신고가 아래로 내려간 상황)
-        """
-        # 1차 — S1 True (돌파)
-        _run_update_with_mocks(self.tmp, 48_000, 55_000, FIXED_1030)
-        self.assertIsNotNone(_load_tmp(self.tmp)[CODE]["turtle_s1_breakout_since"])
-
-        # 2차 — S1 False (현재가 50000 < s1_high 52000 → 돌파 아님)
-        _run_update_with_mocks(self.tmp, 52_000, 55_000, FIXED_1030)
-        rec = _load_tmp(self.tmp)[CODE]
-
-        self.assertFalse(rec.get("turtle_s1_signal"), "S1 신호가 False여야 함")
-        self.assertIsNone(rec.get("turtle_s1_breakout_since"),
-                          "신호가 꺼지면 breakout_since 가 None이어야 함")
-
-
-# ══════════════════════════════════════════════════════════
-class TestFullPipeline(unittest.TestCase):
-    """run_update() → JSON → run_timer_check() 전체 파이프라인 검증"""
+class TestRunUpdatePeakTracking(unittest.TestCase):
+    """run_update() — peak_price·peak_locked·entry_ready 상태 전환 검증"""
 
     def setUp(self):
         fd, self.tmp = tempfile.mkstemp(suffix=".json")
@@ -199,87 +104,142 @@ class TestFullPipeline(unittest.TestCase):
         if os.path.exists(self.tmp):
             os.unlink(self.tmp)
 
-    def _full_run(
-        self,
-        s1_high: int,
-        s2_high: int,
-        update_now: datetime,
-        check_now: datetime,
-    ) -> list:
-        """
-        run_update()로 JSON을 생성한 뒤
-        run_timer_check()가 그 JSON을 읽어 신호를 반환하는 전체 흐름을 실행한다.
-        """
-        # ① 상태 파일 갱신
-        _run_update_with_mocks(self.tmp, s1_high, s2_high, update_now)
+    # ── [1] 최초 돌파 — peak_price 기록, peak_locked=False ───────
 
-        # ② 진입 신호 체크 (임시 JSON 경유, 고정 시각 사용)
+    def test_최초돌파_peak_price_기록(self):
+        """새 종목이 처음 S1 돌파 시 peak_price가 현재가로 기록되어야 한다."""
+        _run_update_with_mocks(self.tmp, current_price=50_000)
+        rec = _load_tmp(self.tmp).get(CODE, {})
+
+        self.assertTrue(rec.get("turtle_s1_signal"),       "S1 신호 True여야 함")
+        self.assertEqual(rec.get("turtle_s1_peak_price"),  50_000, "peak_price=현재가")
+        self.assertFalse(rec.get("turtle_s1_peak_locked"), "peak_locked=False (WATCHING)")
+        self.assertFalse(rec.get("turtle_s1_entry_ready"), "entry_ready=False")
+
+    # ── [2] 가격 하락 — peak_locked=True (PULLBACK 전환) ─────────
+
+    def test_가격하락_PULLBACK_전환(self):
+        """
+        1차: 50000 (최고값=50000, 잠금=False)
+        2차: 49000 (50000보다 낮음) → peak_locked=True
+        """
+        _run_update_with_mocks(self.tmp, current_price=50_000)  # 1차: WATCHING
+        _run_update_with_mocks(self.tmp, current_price=49_000)  # 2차: PULLBACK 시작
+        rec = _load_tmp(self.tmp).get(CODE, {})
+
+        self.assertTrue(rec.get("turtle_s1_peak_locked"),  "peak_locked=True (PULLBACK)")
+        self.assertEqual(rec.get("turtle_s1_peak_price"),  50_000, "최고값은 50000 유지")
+        self.assertFalse(rec.get("turtle_s1_entry_ready"), "아직 재돌파 안 함")
+
+    # ── [3] 재돌파 — entry_ready=True ────────────────────────────
+
+    def test_재돌파_entry_ready_True(self):
+        """
+        1차: 50000 (WATCHING, peak=50000)
+        2차: 49000 (PULLBACK, peak=50000, locked=True)
+        3차: 51000 (재돌파! entry_ready=True)
+        """
+        _run_update_with_mocks(self.tmp, current_price=50_000)  # WATCHING
+        _run_update_with_mocks(self.tmp, current_price=49_000)  # PULLBACK
+        _run_update_with_mocks(self.tmp, current_price=51_000)  # 재돌파
+        rec = _load_tmp(self.tmp).get(CODE, {})
+
+        self.assertTrue(rec.get("turtle_s1_entry_ready"),  "entry_ready=True (재돌파!)")
+        self.assertTrue(rec.get("turtle_s1_peak_locked"),  "peak_locked 유지")
+
+    # ── [4] 신호 소멸 — 전체 초기화 ──────────────────────────────
+
+    def test_신호소멸_전체초기화(self):
+        """
+        S1 True (PULLBACK 상태) → S1 False (돌파값 아래) → 전체 초기화
+        """
+        _run_update_with_mocks(self.tmp, current_price=50_000)
+        _run_update_with_mocks(self.tmp, current_price=49_000)  # PULLBACK
+
+        # 현재가가 s1_high(52000) 아래 → S1 False
+        _run_update_with_mocks(self.tmp, current_price=47_000, s1_high=52_000)
+        rec = _load_tmp(self.tmp).get(CODE, {})
+
+        self.assertFalse(rec.get("turtle_s1_signal"),      "S1 신호 False")
+        self.assertIsNone(rec.get("turtle_s1_peak_price"), "peak_price=None 초기화")
+        self.assertFalse(rec.get("turtle_s1_peak_locked"), "peak_locked=False 초기화")
+        self.assertFalse(rec.get("turtle_s1_entry_ready"), "entry_ready=False 초기화")
+
+
+# ══════════════════════════════════════════════════════════
+class TestFullPipeline(unittest.TestCase):
+    """run_update() × N → JSON → run_timer_check() 전체 파이프라인 검증"""
+
+    def setUp(self):
+        fd, self.tmp = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        os.unlink(self.tmp)
+
+    def tearDown(self):
+        if os.path.exists(self.tmp):
+            os.unlink(self.tmp)
+
+    def _timer_check(self, fixed_now: datetime) -> list:
+        """임시 JSON을 읽어 run_timer_check() 실행."""
         with patch("target_manager.UNHELD_RECORD_FILE", self.tmp), \
              patch("timer_agent.get_watchlist", return_value=WATCHLIST), \
-             patch("timer_agent._now_kst",      return_value=check_now):
+             patch("timer_agent._now_kst",      return_value=fixed_now):
             return timer_agent.run_timer_check()
 
-    # ── [4] S1 신호 전체 파이프라인 ──────────────────────────────
+    # ── [5] S1 신호 전체 파이프라인 ──────────────────────────────
 
-    def test_S1_파이프라인_30분_경과_신호발생(self):
+    def test_S1_파이프라인_풀백후_재돌파_신호발생(self):
         """
-        run_update() 09:55에 S1 돌파 기록 →
-        run_timer_check() 10:30에 확인 → 35분 경과 + 10시 이후 → TURTLE_S1 신호
+        1차 run_update(): 50000 → WATCHING
+        2차 run_update(): 49000 → PULLBACK
+        3차 run_update(): 51000 → entry_ready=True
+        run_timer_check() 10:30 → TURTLE_S1 신호
         """
-        UPDATE_AT = KST.localize(datetime(*_DATE, 9, 55, 0))
-        signals = self._full_run(
-            s1_high   = 48_000,
-            s2_high   = 55_000,
-            update_now= UPDATE_AT,
-            check_now = FIXED_1030,
-        )
-        self.assertEqual(len(signals), 1, "신호가 1개여야 함")
+        _run_update_with_mocks(self.tmp, current_price=50_000)
+        _run_update_with_mocks(self.tmp, current_price=49_000)
+        _run_update_with_mocks(self.tmp, current_price=51_000)
+
+        signals = self._timer_check(FIXED_1030)
+        self.assertEqual(len(signals), 1,          "신호가 1개여야 함")
         self.assertEqual(signals[0]["code"],         CODE)
         self.assertEqual(signals[0]["entry_source"], "TURTLE_S1")
 
-    def test_S1_파이프라인_30분_미달_신호없음(self):
+    def test_S1_파이프라인_재돌파_없으면_신호없음(self):
         """
-        run_update() 10:10에 S1 돌파 기록 →
-        run_timer_check() 10:30에 확인 → 20분만 경과 → 신호 없음
+        PULLBACK 상태이지만 아직 재돌파 없음 → 신호 없음
         """
-        UPDATE_AT = KST.localize(datetime(*_DATE, 10, 10, 0))
-        signals = self._full_run(
-            s1_high   = 48_000,
-            s2_high   = 55_000,
-            update_now= UPDATE_AT,
-            check_now = FIXED_1030,
-        )
-        self.assertEqual(signals, [], "30분 미달이면 신호 없음")
+        _run_update_with_mocks(self.tmp, current_price=50_000)  # WATCHING
+        _run_update_with_mocks(self.tmp, current_price=49_000)  # PULLBACK (entry_ready=False)
 
-    # ── [5] S1+S2 동시 — S2 우선 ─────────────────────────────────
+        signals = self._timer_check(FIXED_1030)
+        self.assertEqual(signals, [], "재돌파 없으면 신호 없음")
+
+    # ── [6] S1+S2 동시 — S2 우선 ─────────────────────────────────
 
     def test_S1_S2_동시_S2가_우선_반환(self):
         """
-        S1·S2 모두 돌파 + 둘 다 30분 가드 통과 → TURTLE_S2 하나만 반환
+        S1·S2 모두 entry_ready=True → TURTLE_S2 하나만 반환
+        s1_high=s2_high=48000 → 둘 다 True
         """
-        UPDATE_AT = KST.localize(datetime(*_DATE, 9, 55, 0))
-        signals = self._full_run(
-            s1_high   = 48_000,   # S1 True
-            s2_high   = 48_000,   # S2 True
-            update_now= UPDATE_AT,
-            check_now = FIXED_1030,
-        )
-        self.assertEqual(len(signals), 1, "같은 종목이면 S2 하나만")
+        _run_update_with_mocks(self.tmp, current_price=50_000, s1_high=48_000, s2_high=48_000)
+        _run_update_with_mocks(self.tmp, current_price=49_000, s1_high=48_000, s2_high=48_000)
+        _run_update_with_mocks(self.tmp, current_price=51_000, s1_high=48_000, s2_high=48_000)
+
+        signals = self._timer_check(FIXED_1030)
+        self.assertEqual(len(signals), 1,                        "같은 종목이면 S2 하나만")
         self.assertEqual(signals[0]["entry_source"], "TURTLE_S2")
 
-    # ── [6] 10시 이전 — 신호 없음 ────────────────────────────────
+    # ── [7] 10시 이전 — 신호 없음 ────────────────────────────────
 
-    def test_10시이전_S1돌파_신호없음(self):
+    def test_10시이전_entry_ready여도_신호없음(self):
         """
-        S1 돌파가 35분 이상 경과했더라도 현재 시각이 10시 이전이면 신호 없음
+        entry_ready=True이더라도 현재 시각이 10시 이전이면 신호 없음
         """
-        UPDATE_AT = KST.localize(datetime(*_DATE, 9, 15, 0))
-        signals = self._full_run(
-            s1_high   = 48_000,
-            s2_high   = 55_000,
-            update_now= UPDATE_AT,
-            check_now = FIXED_0950,  # 09:50 — 10시 이전
-        )
+        _run_update_with_mocks(self.tmp, current_price=50_000)
+        _run_update_with_mocks(self.tmp, current_price=49_000)
+        _run_update_with_mocks(self.tmp, current_price=51_000)  # entry_ready=True
+
+        signals = self._timer_check(FIXED_0950)  # 09:50 — 10시 이전
         self.assertEqual(signals, [], "10시 이전이면 신호 없음")
 
 
@@ -296,7 +256,7 @@ if __name__ == "__main__":
     suite  = unittest.TestSuite()
 
     for cls in [
-        TestRunUpdateBreakoutSince,
+        TestRunUpdatePeakTracking,
         TestFullPipeline,
     ]:
         suite.addTests(loader.loadTestsFromTestCase(cls))
