@@ -69,7 +69,7 @@
 | `turtle_order_logic.py` | 리스크 기반 Unit 수량 계산, 피라미딩 주문, 예외 진입 처리 |
 | `risk_guardian.py` | 2N 하드 손절 및 트레일링 스탑 실시간 감시 |
 | `balance_sync.py` | 실행 시작 시 실제 잔고 ↔ held_stock_record.json 동기화 — 수동 매수 종목 발견 시 1회 알림 후 자동 편입 (매도 전략만 감시). 잔고 불일치 종목은 `ls_client.get_today_executions()`(t0425)로 당일 체결을 받아와 원장에 없는 것만 `MANUAL_SYNC`로 기록 (매도는 수익률·수익금 계산, order_no로 중복 방지) |
-| `chart_updater.py` | 구글 시트 "포트폴리오 추이" 데이터로 "손익차트" 탭에 콤보 차트(일일 막대 + 누적 선) 자동 생성 |
+| `chart_updater.py` | 구글 시트 "포트폴리오 추이" 데이터로 "손익차트" 탭에 콤보 차트(일일 막대 + 누적 선) 자동 생성 — 일별 데이터를 일/주/월/분기/년 5단위로 집계해 숨김 시트("차트데이터")에 저장, F1 드롭다운으로 기간 단위 선택 시 차트 자동 전환 (선택값은 재생성 시에도 유지) |
 | `sector_cache.py` | 종목별 테마 캐시 관리 (t1532 API, sector_cache.json) |
 | `daily_chart_cache.py` | 일봉 캐시 관리 — 09:05 1회 빌드 후 당일 재사용 |
 | `run_all.py` | 통합 배치 실행기 — 장 시간 체크 후 모든 모듈을 올바른 순서로 실행 |
