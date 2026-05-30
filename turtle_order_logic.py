@@ -316,6 +316,7 @@ def place_entry_order(
         "total_qty":             qty,                    # 피라미딩 시 평균가 계산에 사용
         "entry_source":          entry_source,           # 진입 경로 (TURTLE_S1 / TURTLE_S2)
         "effective_risk_factor": effective_risk_factor,  # 종목별 유효 리스크팩터 (피라미딩 수량 계산에 재사용)
+        "high_since_entry":      price,                  # 매수 후 장중 최고가 — 트레일링 손절 기준 (risk_guardian이 갱신)
     }
     save_position_state(position_state)
 

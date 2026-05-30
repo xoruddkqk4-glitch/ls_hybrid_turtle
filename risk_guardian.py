@@ -8,9 +8,11 @@
 #
 # 두 가지 청산 조건:
 #
-#   [1] 하드 손절 (2N Stop — 최우선 처리)
-#       현재가 ≤ stop_loss_price (마지막 매수가 - 2×ATR)
-#       → 추세 예측이 완전히 틀린 것 → 즉시 전량 매도
+#   [1] 하드 손절 (트레일링 2N Stop — 최우선 처리)
+#       현재가 ≤ stop_loss_price (매수 후 최고가 - 2×ATR)
+#       → 매 실행 시 현재가가 최고가를 넘으면 high_since_entry를 갱신하고
+#          high_since_entry - 2N이 기존 손절가보다 높으면 손절가를 자동으로 올린다.
+#       → 즉시 전량 매도
 #
 #   [2] 트레일링 스탑 (익절)
 #       ① 10일 신저가 경신: 최근 10일 중 가장 낮은 종가보다 현재가가 낮아짐
@@ -410,8 +412,36 @@ def run_guardian(balance: Optional[list] = None) -> Set[str]:
         day10_low = indicators.get("day10_low", 0)
         ma5       = indicators.get("ma5", 0.0)
 
+        # ── 매수 후 최고가 갱신 및 트레일링 손절가 상향 ──────────────────────────
+        # 현재가가 매수 후 최고가를 넘으면 최고가를 갱신하고,
+        # 최고가 - 2N이 기존 손절가보다 높아지면 손절가를 자동으로 올린다.
+        atr_n            = indicators.get("atr", 0.0)
+        # high_since_entry 없는 구버전 기록은 last_buy_price를 시작점으로 사용
+        high_since_entry = pos.get("high_since_entry", pos.get("last_buy_price", 0))
+        _updated         = False
+
+        if high_since_entry > 0 and current_price > high_since_entry:
+            # 현재가가 최고가를 갱신 → 기록 업데이트
+            pos["high_since_entry"] = current_price
+            high_since_entry        = current_price
+            _updated                = True
+
+        if atr_n > 0 and high_since_entry > 0:
+            # 최고가 - 2N 계산 → 기존 손절가보다 높으면 손절가 상향
+            trailing_stop = int(high_since_entry - 2 * atr_n)
+            if trailing_stop > pos.get("stop_loss_price", 0):
+                pos["stop_loss_price"] = trailing_stop
+                _updated               = True
+
+        if _updated:
+            save_position_state(position_state)
+
+        # 트레일링으로 손절가가 올라갔을 수 있으므로 최신값으로 재취득 (표시·체크에 반영)
+        stop_loss_price_val = pos.get("stop_loss_price", 0)
+        # ─────────────────────────────────────────────────────────────────────
+
         # 매도 기준 후보 3가지를 모은 뒤 "가장 높은 가격"을 가장 먼저 닿는 매도 신호로 표시한다
-        # ① 2N 손절: stop_loss_price (손실·수익 무관 적용)
+        # ① 2N 손절: stop_loss_price (트레일링으로 상향될 수 있음, 손실·수익 무관 적용)
         # ② 10일 신저가: day10_low (손실·수익 무관 적용)
         # ③ 5MA: ma5 (수익권 = 현재가 > 평균가일 때만 매도 신호로 작동)
         sell_trigger_candidates = []

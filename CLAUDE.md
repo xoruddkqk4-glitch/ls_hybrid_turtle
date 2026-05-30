@@ -90,7 +90,7 @@
 | `dynamic_watchlist.json` | 09:05 배치 최종 감시 종목 50개 — 모든 모듈이 이 파일을 참조 |
 | `watchlist_config.json` | 수동 화이트리스트/블랙리스트 (없으면 자동 선정만 사용) |
 | `unheld_stock_record.json` | 미보유 종목의 터틀 신호(`turtle_s1/s2_signal`)·풀백 상태(`peak_price·peak_locked·entry_ready`) |
-| `held_stock_record.json` | 보유 종목의 Unit 수·마지막 매수가·손절가·피라미딩 트리거가·종목별 유효 리스크팩터(`effective_risk_factor`) |
+| `held_stock_record.json` | 보유 종목의 Unit 수·마지막 매수가·손절가·피라미딩 트리거가·종목별 유효 리스크팩터(`effective_risk_factor`)·매수 후 최고가(`high_since_entry`) |
 | `trade_ledger.json` | 체결 원장 전체 기록 |
 | `sector_cache.json` | 종목별 테마 캐시 (t1532 API 결과) |
 | `daily_chart_cache.json` | 일봉(60개) 캐시 — 09:05 market_open 직후 생성 |
@@ -147,7 +147,9 @@ SA-SCREENER 완료 → SA-FOUNDATION 완료 → SA-MODULE-ENTRY · SA-MODULE-TRA
 - **포트폴리오 상한**: 전체 **15 Unit**, 동일 테마 **6 Unit**
 
 ### 청산 및 손절
-- **하드 손절(2N Stop)**: 최종 체결가 대비 2N 하락 시 전량 즉시 매도
+- **하드 손절(트레일링 2N Stop)**: 매수 후 최고가(`high_since_entry`) - 2N 하락 시 전량 즉시 매도.
+  가격이 오를수록 손절가가 함께 올라가며, 기존 손절가(`마지막 매수가 - 2N`)보다 높아질 때만 상향됨.
+  `risk_guardian.py`가 10분 주기 실행마다 `high_since_entry`를 갱신하고 손절가를 자동 업데이트.
 - **트레일링 스탑**: 10일 신저가 경신 또는 5MA 하향 돌파 시 익절 청산
 
 ---
@@ -255,5 +257,5 @@ journalctl -u ls_telegram_listener -f        # 실시간 로그
 
 ---
 
-> 마지막 업데이트: 2026-05-29 (터틀 진입 필터 교체 — 30분 가드 제거, 풀백 재돌파(눌림→최고값 재돌파)로 전환. `unheld_stock_record.json`에 peak_price·peak_locked·entry_ready 필드 추가, breakout_since 필드 제거)
+> 마지막 업데이트: 2026-05-30 (손절 기준 변경 — 마지막 매수가 - 2N(고정) → 매수 후 최고가 - 2N(트레일링). `held_stock_record.json`에 `high_since_entry` 필드 추가. `risk_guardian.py`가 10분 주기로 최고가 갱신 및 손절가 자동 상향)
 
