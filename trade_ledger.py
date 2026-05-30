@@ -540,6 +540,42 @@ def _calc_prev_cumulative(all_rows: list, today_row_idx: Optional[int]) -> int:
     return 0
 
 
+def _sum_today_profit_from_sheet(spreadsheet) -> int:
+    """'체결기록' 시트(sheet1)에서 오늘 날짜의 수익금(원)을 합산한다.
+
+    수익금 값은 시트에 "+37,000" 또는 "-15,000" 형태로 저장되므로 파싱이 필요하다.
+    BUY 행은 수익금 칸이 비어 있으므로 별도 필터 없이 빈 값을 건너뛰면 된다.
+    읽기 실패 시 0을 반환한다.
+    """
+    today_str = datetime.now(KST).strftime("%Y-%m-%d")
+    try:
+        sheet    = spreadsheet.sheet1
+        all_rows = sheet.get_all_values()
+        if len(all_rows) < 2:
+            return 0
+
+        # 체결기록 시트 열 인덱스 (0-based)
+        # 인덱스 1: 기록시각(KST) (B열)
+        # 인덱스 16: 수익금(원)  (Q열)
+        total = 0
+        for row in all_rows[1:]:          # 헤더 행(인덱스 0) 제외
+            if len(row) < 17:
+                continue
+            if not row[1].startswith(today_str):   # 오늘 날짜 필터
+                continue
+            profit_str = row[16].strip()           # 수익금(원) — 빈 칸이면 BUY 또는 값 없음
+            if not profit_str:
+                continue
+            try:
+                total += int(profit_str.replace(",", "").replace("+", ""))
+            except ValueError:
+                continue
+        return total
+    except Exception as e:
+        print(f"[원장] 체결기록 시트에서 수익금 합산 실패 → 0으로 처리: {e}")
+        return 0
+
+
 def _refresh_portfolio_today():
     """SELL 체결 후 포트폴리오 추이 시트의 오늘 실현손익·누적수익금을 갱신한다.
 
@@ -548,12 +584,12 @@ def _refresh_portfolio_today():
     오류 발생 시 로그만 남기고 계속 진행한다.
     """
     try:
-        _, ws = _get_portfolio_worksheet()
+        spreadsheet, ws = _get_portfolio_worksheet()
         if ws is None:
             return
 
-        # 오늘 실현손익 합산 (trade_ledger.json 기반, API 호출 없음)
-        today_realized = get_today_realized_pnl()
+        # 오늘 실현손익 합산 ('체결기록' 시트 기반)
+        today_realized = _sum_today_profit_from_sheet(spreadsheet)
         all_rows       = ws.get_all_values()
         today_row_idx  = _find_today_row(ws)  # 1-based, 없으면 None
         prev_cumul     = _calc_prev_cumulative(all_rows, today_row_idx)
