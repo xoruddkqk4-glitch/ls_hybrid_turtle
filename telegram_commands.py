@@ -28,6 +28,8 @@ import pytz
 
 import watchlist_writer
 from telegram_alert import SendMessage
+import daily_chart_cache
+import indicator_calc
 
 # ls_client는 LS API 호출 시점에만 lazy import
 # (programgarden-finance 미설치 환경에서도 다른 명령들이 동작하도록)
@@ -40,6 +42,7 @@ _DIR          = os.path.dirname(os.path.abspath(__file__))
 _HELD_PATH    = os.path.join(_DIR, "held_stock_record.json")
 _DYNAMIC_PATH = os.path.join(_DIR, "dynamic_watchlist.json")
 _CONFIG_PATH  = os.path.join(_DIR, "watchlist_config.json")
+_UNHELD_PATH  = os.path.join(_DIR, "unheld_stock_record.json")
 
 
 # ─────────────────────────────────────────
@@ -211,7 +214,7 @@ def handle_list(args: list) -> str:
 
 
 def handle_watch(args: list) -> str:
-    """오늘 실제 감시 중인 종목 (dynamic_watchlist.json) — 점수 내림차순."""
+    """오늘 실제 감시 중인 종목 (dynamic_watchlist.json) — 분류 및 상세 조회."""
     try:
         with open(_DYNAMIC_PATH, encoding="utf-8") as f:
             dyn = json.load(f)
@@ -224,22 +227,124 @@ def handle_watch(args: list) -> str:
     count  = len(stocks)
     date   = dyn.get("date", "?")
 
+    if not stocks:
+        return f"👀 오늘 감시 종목 (0개, {date} 기준)\n  (없음)"
+
+    if not _ls_login_or_none():
+        return "❌ LS증권 로그인 실패. 잠시 후 다시 시도해 주세요."
+
+    try:
+        import ls_client
+        watchlist_codes = list(stocks.keys())
+        prices = ls_client.get_multi_price(watchlist_codes)
+    except Exception as e:
+        return f"❌ 시세 조회 오류: {e}"
+
+    try:
+        if os.path.exists(_UNHELD_PATH):
+            with open(_UNHELD_PATH, encoding="utf-8") as f:
+                unheld = json.load(f)
+        else:
+            unheld = {}
+    except Exception:
+        unheld = {}
+
+    group_a = [] # 재돌파 대기 중 (🔴)
+    group_b = [] # 매수 조건 대기 중 (🔵)
+
+    for code, info in stocks.items():
+        unheld_info = unheld.get(code, {})
+        s1_locked = unheld_info.get("turtle_s1_peak_locked", False) or unheld_info.get("turtle_s1_entry_ready", False)
+        s2_locked = unheld_info.get("turtle_s2_peak_locked", False) or unheld_info.get("turtle_s2_entry_ready", False)
+
+        item = {
+            "code": code,
+            "name": info.get("name", "?"),
+            "score": info.get("score", 0.0),
+            "s1_locked": s1_locked,
+            "s2_locked": s2_locked,
+            "unheld_info": unheld_info,
+        }
+
+        if s1_locked or s2_locked:
+            group_a.append(item)
+        else:
+            group_b.append(item)
+
+    # 각각 score 내림차순 정렬
+    group_a.sort(key=lambda x: x["score"], reverse=True)
+    group_b.sort(key=lambda x: x["score"], reverse=True)
+
     lines = [f"👀 오늘 감시 종목 ({count}개, {date} 기준)"]
 
-    if not stocks:
-        lines.append("  (없음)")
-        return "\n".join(lines)
+    now_kst = datetime.now(_KST).replace(tzinfo=None)
 
-    # 점수 내림차순 정렬
-    sorted_items = sorted(
-        stocks.items(),
-        key=lambda x: x[1].get("score", 0),
-        reverse=True,
-    )
-    for code, info in sorted_items:
-        name  = info.get("name", "?")
-        score = info.get("score", 0)
-        lines.append(f"  {name}({code}) score={score:.2f}")
+    # 🔴 재돌파 대기 중 종목 출력
+    for item in group_a:
+        code = item["code"]
+        name = item["name"]
+        score = item["score"]
+        s1_locked = item["s1_locked"]
+        s2_locked = item["s2_locked"]
+        unheld_info = item["unheld_info"]
+        cur_price = prices.get(code, 0)
+
+        # 재돌파 기준가 및 시스템 선택 (S2 우선)
+        if s2_locked:
+            peak_price = unheld_info.get("turtle_s2_peak_price")
+            system_label = "S2"
+            locked_at_str = unheld_info.get("turtle_s2_locked_at")
+        else:
+            peak_price = unheld_info.get("turtle_s1_peak_price")
+            system_label = "S1"
+            locked_at_str = unheld_info.get("turtle_s1_locked_at")
+
+        peak_price_val = int(peak_price) if peak_price is not None else 0
+
+        # 대기 시간 계산
+        time_str = "정보 없음"
+        if locked_at_str:
+            try:
+                locked_at = datetime.strptime(locked_at_str, "%Y-%m-%d %H:%M:%S")
+                delta = now_kst - locked_at
+                seconds = int(delta.total_seconds())
+                if seconds < 0:
+                    time_str = "0분째"
+                elif seconds < 60:
+                    time_str = "1분 미만"
+                elif seconds < 3600:
+                    time_str = f"{seconds // 60}분째"
+                else:
+                    hours = seconds // 3600
+                    mins = (seconds % 3600) // 60
+                    time_str = f"{hours}시간 {mins}분째"
+            except Exception:
+                pass
+
+        lines.append(f"\n🔴 {name}({code}) [Score: {score:.2f}]")
+        lines.append(f"  현재가: {cur_price:,}원")
+        lines.append(f"  재돌파 기준가: {peak_price_val:,}원 ({system_label})")
+        lines.append(f"  대기 시간: {time_str} 대기 중")
+
+    # 🔵 매수 조건 대기 중 종목 출력
+    for item in group_b:
+        code = item["code"]
+        name = item["name"]
+        score = item["score"]
+        cur_price = prices.get(code, 0)
+
+        # S1/S2 돌파 기준가 계산
+        daily = daily_chart_cache.get_daily_cached(code, count=60)
+        s1_high = indicator_calc.calc_n_day_high(daily, n=20)
+        s2_high = indicator_calc.calc_n_day_high(daily, n=55)
+
+        s1_str = f"{int(s1_high):,}원" if s1_high > 0 else "정보 없음"
+        s2_str = f"{int(s2_high):,}원" if s2_high > 0 else "정보 없음"
+
+        lines.append(f"\n🔵 {name}({code}) [Score: {score:.2f}]")
+        lines.append(f"  현재가: {cur_price:,}원")
+        lines.append(f"  S1 20일고가 (돌파기준가): {s1_str}")
+        lines.append(f"  S2 55일고가 (돌파기준가): {s2_str}")
 
     return "\n".join(lines)
 
@@ -313,6 +418,7 @@ def handle_balance(args: list) -> str:
     try:
         import ls_client
         summary = ls_client.get_portfolio_summary()
+        balance_list = ls_client.get_balance()
     except Exception as e:
         return f"❌ 잔고 조회 오류: {e}"
 
@@ -326,7 +432,6 @@ def handle_balance(args: list) -> str:
     unrealized = summary.get("unrealized_pnl", 0)
     realized   = summary.get("realized_pnl", 0)
     n_holding  = summary.get("holdings_count", 0)
-    names      = summary.get("holdings_names", "")
 
     pnl_pct = (unrealized / purchase * 100) if purchase > 0 else 0.0
     pnl_sgn = "+" if unrealized >= 0 else ""
@@ -341,8 +446,37 @@ def handle_balance(args: list) -> str:
         f"실현손익:   {realized:+,}원",
         f"보유종목:   {n_holding}개",
     ]
-    if names:
-        lines.append(f"  {names}")
+
+    # 보유 종목 상세 정보 로드
+    try:
+        with open(_HELD_PATH, encoding="utf-8") as f:
+            held = json.load(f)
+    except Exception:
+        held = {}
+
+    if balance_list:
+        lines.append("")
+        lines.append("📈 보유 종목:")
+        for item in balance_list:
+            code = item["code"]
+            name = item.get("name") or held.get(code, {}).get("stock_name", code)
+            qty  = int(item.get("qty", 0))
+            avg  = float(item.get("avg_price", 0))
+            cur  = float(item.get("current_price", 0))
+            pnl_p = (cur - avg) / avg * 100 if avg > 0 else 0.0
+            pnl_a = int((cur - avg) * qty)
+            pnl_sgn_item = "+" if pnl_p >= 0 else ""
+            unit = held.get(code, {}).get("current_unit", 0)
+            lines.append(f"  - {name}({code}) {unit}U {qty:,}주 ({pnl_sgn_item}{pnl_p:.2f}%, {pnl_sgn_item}{pnl_a:,}원)")
+
+    # 리스크 및 예산 요약 정보 추가
+    total_units = sum(pos.get("current_unit", 0) for pos in held.values())
+    lines.append("")
+    lines.append(f"📊 포트폴리오 리스크: {total_units} / 15 Units")
+    lines.append(f"⚠️ 1 Unit 예산 가이드:")
+    lines.append(f"  위험 한도액(2%): {int(total * 0.02):,}원")
+    lines.append(f"  최대 투자액(10%): {int(total * 0.10):,}원")
+
     return "\n".join(lines)
 
 
@@ -380,13 +514,21 @@ def handle_held(args: list) -> str:
         emoji    = "🔴" if pnl_pct < 0 else "🟢"
 
         unit = held.get(code, {}).get("current_unit", 0)
+        max_unit = held.get(code, {}).get("max_unit", 4)
         stop = held.get(code, {}).get("stop_loss_price", 0)
+        next_pyramid = held.get(code, {}).get("next_pyramid_price", 0)
 
         lines.append(f"\n{emoji} {name}({code}) {unit}U {qty:,}주")
-        lines.append(f"  평균가: {int(avg):,}원 → 현재: {int(cur):,}원")
+        lines.append(f"  평균가: {int(avg):,}원")
         lines.append(f"  수익률: {sign}{pnl_pct:.2f}% ({sign}{pnl_amt:,}원)")
         if stop > 0:
             lines.append(f"  손절가: {stop:,}원")
+        lines.append(f"  현재가: {int(cur):,}원")
+        if next_pyramid > 0:
+            if unit >= max_unit:
+                lines.append("  피라미딩: 완료")
+            else:
+                lines.append(f"  피라미딩가: {next_pyramid:,}원")
 
     return "\n".join(lines)
 
