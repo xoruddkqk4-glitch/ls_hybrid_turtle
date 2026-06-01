@@ -249,10 +249,22 @@ def handle_watch(args: list) -> str:
     except Exception:
         unheld = {}
 
+    try:
+        if os.path.exists(_HELD_PATH):
+            with open(_HELD_PATH, encoding="utf-8") as f:
+                held = json.load(f)
+            held_codes = set(held.keys())
+        else:
+            held_codes = set()
+    except Exception:
+        held_codes = set()
+
     group_a = [] # 재돌파 대기 중 (🔴)
     group_b = [] # 매수 조건 대기 중 (🔵)
 
     for code, info in stocks.items():
+        if code in held_codes:
+            continue
         unheld_info = unheld.get(code, {})
         s1_locked = unheld_info.get("turtle_s1_peak_locked", False) or unheld_info.get("turtle_s1_entry_ready", False)
         s2_locked = unheld_info.get("turtle_s2_peak_locked", False) or unheld_info.get("turtle_s2_entry_ready", False)
@@ -275,7 +287,7 @@ def handle_watch(args: list) -> str:
     group_a.sort(key=lambda x: x["score"], reverse=True)
     group_b.sort(key=lambda x: x["score"], reverse=True)
 
-    lines = [f"👀 오늘 감시 종목 ({count}개, {date} 기준)"]
+    lines = [f"👀 오늘 감시 종목 ({len(group_a) + len(group_b)}개, {date} 기준)"]
 
     now_kst = datetime.now(_KST).replace(tzinfo=None)
 
