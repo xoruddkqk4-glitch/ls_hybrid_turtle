@@ -16,10 +16,13 @@
 #
 #   [2] 트레일링 스탑 (익절)
 #       ① 10일 신저가 경신: 최근 10일 중 가장 낮은 종가보다 현재가가 낮아짐
-#          → 하락 추세로 전환 → 무조건 청산
+#          → 하락 추세로 전환 → 무조건 청산 (시간 제한 없음)
 #       ② 5MA 하향 돌파: 현재가가 5일 이동평균선 아래로 내려감
 #          → 단, 평균 매입단가보다 현재가가 높을 때(수익권)만 적용
 #          → 손해 보는 상태에서는 5MA 돌파로 팔지 않음
+#          → 휩쏘(장중 잠깐 5MA를 밑돌았다 회복) 방지를 위해
+#            장 마감 직전 15:20(KST) 이후에만 체크한다.
+#            crontab이 15:10·15:20에 실행하므로 실질적으로 15:20 실행분에서 하루 1번만 작동.
 #
 # 사용법:
 #   import risk_guardian
@@ -55,6 +58,12 @@ def _get_stock_name(code: str) -> str:
 
 # 한국 표준시 (KST, UTC+9)
 _KST = pytz.timezone("Asia/Seoul")
+
+# 5MA 하향 돌파 익절을 체크하는 최소 시각 (KST 기준)
+# 이 시각 이후에만 5MA 익절을 실행해 장중 휩쏘(잠깐 밑돌았다 회복)를 방지한다.
+# crontab이 15:10·15:20에 실행하므로 실질적으로 15:20 실행분에서 하루 1번만 작동한다.
+_MA5_CHECK_HOUR   = 15
+_MA5_CHECK_MINUTE = 20
 
 
 # ─────────────────────────────────────────
@@ -148,9 +157,10 @@ def check_trailing_stop(code: str, current_price: int, pos: dict, indicators: di
       현재가 ≤ 최근 10일 중 가장 낮은 종가
       → 추세가 꺾인 것으로 판단, 수익·손실 여부와 관계없이 청산
 
-    조건 ②: 5MA 하향 돌파 (수익권에서만)
-      현재가 < 5일 이동평균선 AND 현재가 > 평균 매입단가
+    조건 ②: 5MA 하향 돌파 (수익권에서만, 15:20 이후에만)
+      현재가 < 5일 이동평균선 AND 현재가 > 평균 매입단가 AND 현재 시각 ≥ 15:20(KST)
       → 수익이 난 상태에서 단기 추세가 꺾일 때 익절
+      → 휩쏘 방지를 위해 종가에 가까운 15:20 이후에만 체크한다.
 
     Args:
         code:          종목코드 (로그 출력용)
@@ -176,9 +186,18 @@ def check_trailing_stop(code: str, current_price: int, pos: dict, indicators: di
         else:
             return "10일 신저가 경신 손절"
 
-    # 조건 ②: 5MA 하향 돌파 (수익권일 때만)
+    # 조건 ②: 5MA 하향 돌파 (수익권일 때만, 15:20 이후에만)
     if ma5 > 0 and current_price < ma5:
         if avg_buy_price > 0 and current_price > avg_buy_price:
+            # 휩쏘 방지: 15:20(KST) 이전이면 장중 변동일 수 있으므로 매도하지 않는다.
+            # crontab이 15:10·15:20에 실행하므로 실질적으로 15:20 실행분에서 하루 1번만 작동.
+            now_kst = datetime.now(_KST)
+            if (now_kst.hour, now_kst.minute) < (_MA5_CHECK_HOUR, _MA5_CHECK_MINUTE):
+                print(f"[risk_guardian] {name}({code}) 5MA 아래(수익권)지만 "
+                      f"{_MA5_CHECK_HOUR:02d}:{_MA5_CHECK_MINUTE:02d} 이전"
+                      f"({now_kst.strftime('%H:%M')}) → 휩쏘 방지 위해 5MA 익절 보류")
+                return None
+
             # 수익권(현재가 > 평균 매입단가)에서 5MA 아래로 내려온 경우
             profit_pct = (current_price - avg_buy_price) / avg_buy_price * 100
             print(f"[risk_guardian] {name}({code}) 📉 5MA 하향 돌파 (수익권 익절)! "
