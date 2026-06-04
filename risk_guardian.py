@@ -1,4 +1,4 @@
-# risk_guardian.py
+ # risk_guardian.py
 # 손절·익절 감시 모듈
 #
 # 역할:
@@ -13,6 +13,10 @@
 #       → 매 실행 시 현재가가 최고가를 넘으면 high_since_entry를 갱신하고
 #          high_since_entry - 2N이 기존 손절가보다 높으면 손절가를 자동으로 올린다.
 #       → 즉시 전량 매도
+#
+#   ※ 블랙리스트(/block) 종목은 아래 두 조건을 모두 건너뛴다 (매도 감시 완전 중단).
+#     추가 매수뿐 아니라 손절·익절도 멈추고 수동 매도에만 맡긴다.
+#     /unblock하면 블랙리스트에서 빠져 매도 감시가 자동 재개된다.
 #
 #   [2] 트레일링 스탑 (익절)
 #       ① 10일 신저가 경신: 최근 10일 중 가장 낮은 종가보다 현재가가 낮아짐
@@ -38,6 +42,7 @@ import ls_client
 import indicator_calc
 import trade_ledger
 import telegram_alert
+import watchlist_writer
 from config import get_watchlist
 from turtle_order_logic import load_position_state, save_position_state
 
@@ -411,6 +416,17 @@ def run_guardian(balance: Optional[list] = None) -> Set[str]:
         if code not in watchlist:
             print(f"[risk_guardian] {name}({code}) [!] 감시 목록에서 제외됐지만 보유 중 "
                   f"- 손절·익절 감시 계속")
+
+        # 블랙리스트(/block) 종목은 매도 감시를 완전히 건너뛴다 (수동 매도 전용).
+        # 손절도 작동하지 않으므로 사용자가 직접 팔거나 /unblock으로 감시를 다시 켜야 한다.
+        try:
+            if watchlist_writer.is_blacklisted(code):
+                print(f"[risk_guardian] {name}({code}) 🚫 블랙리스트 종목 → 매도 감시 중단 "
+                      f"(수동 매도 전용, /unblock {code}로 재개)")
+                continue
+        except Exception as e:
+            # 블랙리스트 조회 오류는 치명적이지 않음 — 안전하게 감시를 계속한다(손절 보호 우선)
+            print(f"[risk_guardian] {name}({code}) 블랙리스트 조회 오류: {e} → 감시 계속")
 
         # 평균가/피라미딩가/수익률/수익금을 함께 표시 (한눈에 포지션 상태 파악)
         avg_buy_price       = pos.get("avg_buy_price", 0)

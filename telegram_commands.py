@@ -30,6 +30,13 @@ import watchlist_writer
 from telegram_alert import SendMessage
 import daily_chart_cache
 import indicator_calc
+import sector_cache
+# 포트폴리오/테마 유닛 상한 상수 — turtle_order_logic과 같은 값을 재사용한다
+from turtle_order_logic import (
+    MAX_TOTAL_UNITS,
+    MAX_SECTOR_UNITS,
+    MAX_UNIT_PURCHASE_RATIO,
+)
 
 # ls_client는 LS API 호출 시점에만 lazy import
 # (programgarden-finance 미설치 환경에서도 다른 명령들이 동작하도록)
@@ -419,6 +426,69 @@ def handle_unblock(args: list) -> str:
 
 
 # ─────────────────────────────────────────
+# 피라미딩 지연 사유 판단 헬퍼
+# ─────────────────────────────────────────
+
+def _diagnose_pyramid_block(code: str, current_price: float, held: dict,
+                            total_capital: float) -> str:
+    """현재가가 피라미딩가를 넘었는데도 추가 매수가 안 된 이유를 찾아 문장으로 돌려준다.
+
+    turtle_order_logic.run_orders()의 피라미딩 [B] 블록과 같은 순서로 점검한다.
+    (블랙리스트 → 전체 유닛 한도 → 테마 한도 → 1주 가격이 매수금 상한 초과)
+
+    Args:
+        code:          종목코드 6자리
+        current_price: 현재가 (원)
+        held:          held_stock_record.json 전체 딕셔너리
+        total_capital: 총자본 (원, 0이면 매수금 상한 점검은 건너뜀)
+
+    Returns:
+        사유 문자열 (예: "블랙리스트 차단됨"). 막힌 이유를 못 찾으면 빈 문자열.
+    """
+    # ① 블랙리스트(/block) 차단 — 추가 매수·매도 감시 모두 중단된 상태
+    try:
+        if watchlist_writer.is_blacklisted(code):
+            return "🚫 블랙리스트(/block) 차단 — 추가 매수 중단"
+    except Exception:
+        pass
+
+    # ② 포트폴리오 전체 유닛 한도(15) 도달
+    total_units = sum(pos.get("current_unit", 0) for pos in held.values())
+    if total_units >= MAX_TOTAL_UNITS:
+        return f"포트폴리오 유닛 한도 도달 ({total_units}/{MAX_TOTAL_UNITS} Unit)"
+
+    # ③ 같은 테마 유닛 한도(6) 도달
+    sector = _safe_sector(code)
+    if sector:
+        sector_units = sum(
+            pos.get("current_unit", 0)
+            for c, pos in held.items()
+            if _safe_sector(c) == sector
+        )
+        if sector_units >= MAX_SECTOR_UNITS:
+            return (f"테마 유닛 한도 도달 "
+                    f"(테마: {sector}, {sector_units}/{MAX_SECTOR_UNITS} Unit)")
+
+    # ④ 1주 가격이 1 Unit 매수금 상한(총자본 10%)을 초과 → 1주도 못 삼
+    if total_capital > 0 and current_price > 0:
+        max_unit_amount = total_capital * MAX_UNIT_PURCHASE_RATIO
+        if current_price > max_unit_amount:
+            return (f"1주 가격({int(current_price):,}원)이 "
+                    f"1 Unit 상한({int(max_unit_amount):,}원) 초과")
+
+    # 막힌 이유를 못 찾음 — 다음 정규 실행(10분 주기) 때 매수될 가능성이 큼
+    return ""
+
+
+def _safe_sector(code: str) -> str:
+    """sector_cache 조회를 예외 없이 안전하게 감싼다 (오류 시 빈 문자열)."""
+    try:
+        return sector_cache.get_stock_sector(code)
+    except Exception:
+        return ""
+
+
+# ─────────────────────────────────────────
 # 핸들러: LS API 사용 (매번 새 로그인 — A안)
 # ─────────────────────────────────────────
 
@@ -500,6 +570,11 @@ def handle_held(args: list) -> str:
     try:
         import ls_client
         balance = ls_client.get_balance()
+        # 1 Unit 매수금 상한 점검에 쓸 총자본도 함께 조회 (실패해도 진행)
+        try:
+            total_capital = ls_client.get_total_capital()
+        except Exception:
+            total_capital = 0
     except Exception as e:
         return f"❌ 잔고 조회 오류: {e}"
 
@@ -539,6 +614,15 @@ def handle_held(args: list) -> str:
         if next_pyramid > 0:
             if unit >= max_unit:
                 lines.append("  피라미딩: 완료")
+            elif cur >= next_pyramid:
+                # 현재가가 피라미딩가를 이미 넘었는데도 추가 매수가 안 일어난 경우
+                # → 막힌 이유를 찾아 함께 안내한다 (사용자 혼란 방지)
+                reason = _diagnose_pyramid_block(code, cur, held, total_capital)
+                lines.append(f"  피라미딩가: {next_pyramid:,}원 (현재가가 이미 초과)")
+                if reason:
+                    lines.append(f"  └ 추가 매수 대기 사유: {reason}")
+                else:
+                    lines.append("  └ 다음 정규 실행(10분 주기) 때 추가 매수 예정")
             else:
                 lines.append(f"  피라미딩가: {next_pyramid:,}원")
 

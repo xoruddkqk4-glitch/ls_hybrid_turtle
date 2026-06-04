@@ -115,6 +115,23 @@ def is_held(code: str) -> bool:
     return code in held
 
 
+def is_blacklisted(code: str) -> bool:
+    """watchlist_config.json의 블랙리스트에 속한 종목인지 확인한다.
+
+    risk_guardian.py가 매도(손절·익절) 감시를 건너뛸지 판단할 때 사용한다.
+    블랙리스트 종목은 추가 매수뿐 아니라 매도 감시까지 완전히 멈춘다(수동 매도 전용).
+
+    Args:
+        code: 종목코드 6자리
+
+    Returns:
+        True:  블랙리스트에 있음 → 매도 감시 제외
+        False: 블랙리스트에 없음 → 정상 감시
+    """
+    cfg = _load_config()
+    return any(item["code"] == code for item in cfg["blacklist"])
+
+
 # ─────────────────────────────────────────
 # dynamic_watchlist.json 즉시 갱신
 # ─────────────────────────────────────────
@@ -333,13 +350,26 @@ def add_to_blacklist(code: str, name: str) -> dict:
     _update_dynamic_watchlist("remove", code)
 
     warn_held = is_held(code)
+    # 보유 중인 종목을 차단하면 매도 감시(손절·익절)까지 멈춘다는 점을 명확히 경고한다.
+    if warn_held:
+        base_msg = (f"블랙리스트 추가 (감시 제외): {name}({code})"
+                    if not already
+                    else f"이미 차단됨 (이름 갱신): {name}({code})")
+        msg = (f"{base_msg}\n"
+               f"⚠️ 현재 보유 중인 종목입니다. 추가 매수뿐 아니라 "
+               f"매도 감시(2N 손절·트레일링 스탑)도 멈춥니다. "
+               f"자동 손절이 작동하지 않으므로 직접 매도하거나 "
+               f"/unblock {code} 로 감시를 다시 켜주세요.")
+    else:
+        msg = (f"이미 차단됨 (이름 갱신): {name}({code})"
+               if already
+               else f"블랙리스트 추가 (감시 제외): {name}({code})")
+
     return {
         "ok":        True,
         "already":   already,
         "warn_held": warn_held,
-        "msg":       (f"이미 차단됨 (이름 갱신): {name}({code})"
-                      if already
-                      else f"블랙리스트 추가 (감시 제외): {name}({code})"),
+        "msg":       msg,
     }
 
 
@@ -347,7 +377,8 @@ def remove_from_blacklist(code: str) -> dict:
     """블랙리스트에서 종목 제거 (차단 해제).
 
     화이트리스트와 dynamic_watchlist는 변경하지 않는다.
-    다시 감시하고 싶으면 /add 명령을 별도로 실행해야 한다.
+    블랙리스트에서 빠지므로 보유 중인 종목의 매도 감시(손절·익절)는 자동으로 재개된다.
+    다만 신규 매수·피라미딩까지 다시 하려면 /add 명령을 별도로 실행해야 한다.
 
     Returns:
         {
