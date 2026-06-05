@@ -64,9 +64,9 @@
 | `trade_ledger.py` | 체결 원장 기록 + Google Sheets 동기화 — 매도 체결 시 '포트폴리오 추이'·'손익차트' 시트 자동 갱신 |
 | `telegram_alert.py` | 텔레그램 알림 단일 모듈 |
 | `config.py` | `get_watchlist()` — `dynamic_watchlist.json`을 읽어 감시 종목 반환 |
-| `target_manager.py` | 미보유 종목 터틀 신호(`turtle_s1/s2_signal`) 및 풀백 상태(`peak_price·peak_locked·entry_ready`) 갱신 |
+| `target_manager.py` | 미보유 종목 터틀 신호(`turtle_s1/s2_signal`) 및 풀백 상태(`peak_price·peak_locked·entry_ready`) 갱신. 신호가 처음 켜질 때 `turtle_s1/s2_first_breakout_at`(최초 돌파 시각) 기록 |
 | `timer_agent.py` | 풀백 재돌파 진입 신호 체크 (`entry_ready` + 10시 필터) |
-| `turtle_order_logic.py` | 리스크 기반 Unit 수량 계산, 피라미딩 주문, 예외 진입 처리 |
+| `turtle_order_logic.py` | 리스크 기반 Unit 수량 계산, 피라미딩 주문, 예외 진입 처리. 진입 메시지에 돌파→매수 소요시간 포함 |
 | `risk_guardian.py` | 2N 하드 손절 및 트레일링 스탑 실시간 감시 |
 | `balance_sync.py` | 실행 시작 시 실제 잔고 ↔ held_stock_record.json 동기화 — 수동 매수 종목 발견 시 1회 알림 후 자동 편입 (매도 전략만 감시). 잔고 불일치 종목은 `ls_client.get_today_executions()`(t0425)로 당일 체결을 받아와 원장에 없는 것만 `MANUAL_SYNC`로 기록 (매도는 수익률·수익금 계산, order_no로 중복 방지) |
 | `chart_updater.py` | 구글 시트 "포트폴리오 추이" 데이터로 "손익차트" 탭에 콤보 차트(일일 막대 + 누적 선) 자동 생성 — 일별 데이터를 일/주/월/분기/년 5단위로 집계해 숨김 시트("차트데이터")에 저장, F1 드롭다운으로 기간 단위 선택 시 차트 자동 전환 (선택값은 재생성 시에도 유지) |
@@ -74,7 +74,7 @@
 | `daily_chart_cache.py` | 일봉 캐시 관리 — 09:05 1회 빌드 후 당일 재사용 |
 | `run_all.py` | 통합 배치 실행기 — 장 시간 체크 후 모든 모듈을 올바른 순서로 실행 |
 | `telegram_listener.py` | **텔레그램 봇 데몬 (24시간 systemd 운영)** — 10초 폴링, 권한 검증, 명령어 라우팅 |
-| `telegram_commands.py` | 텔레그램 명령어 핸들러 10개 (`/add`,`/remove`,`/block`,`/unblock`,`/list`,`/watch`,`/held`,`/balance`,`/status`,`/help`) |
+| `telegram_commands.py` | 텔레그램 명령어 핸들러 10개 (`/add`,`/remove`,`/block`,`/unblock`,`/list`,`/watch`,`/held`,`/balance`,`/status`,`/help`). `/held`에서 손절가 옆 손익·피라미딩 대기 사유 표시 |
 | `watchlist_writer.py` | `watchlist_config.json` + `dynamic_watchlist.json` 동시 안전 갱신 (atomic 쓰기, idempotent) |
 | `deploy/ls_telegram_listener.service` | 텔레그램 데몬 systemd 서비스 정의 |
 | `test_dummy_trade.py` | 더미 체결 기록 테스트 스크립트 (개발·검증 전용, 실계좌 무관) |
@@ -89,7 +89,7 @@
 | `stock_candidates.json` | 08:40 배치 후보 종목 (스코어·지표 포함) |
 | `dynamic_watchlist.json` | 09:05 배치 최종 감시 종목 50개 — 모든 모듈이 이 파일을 참조 |
 | `watchlist_config.json` | 수동 화이트리스트/블랙리스트 (없으면 자동 선정만 사용) |
-| `unheld_stock_record.json` | 미보유 종목의 터틀 신호(`turtle_s1/s2_signal`)·풀백 상태(`peak_price·peak_locked·entry_ready`) |
+| `unheld_stock_record.json` | 미보유 종목의 터틀 신호(`turtle_s1/s2_signal`)·최초 돌파 시각(`turtle_s1/s2_first_breakout_at`)·풀백 상태(`peak_price·peak_locked·entry_ready`) |
 | `held_stock_record.json` | 보유 종목의 Unit 수·마지막 매수가·손절가·피라미딩 트리거가·종목별 유효 리스크팩터(`effective_risk_factor`)·매수 후 최고가(`high_since_entry`) |
 | `trade_ledger.json` | 체결 원장 전체 기록 |
 | `sector_cache.json` | 종목별 테마 캐시 (t1532 API 결과) |
@@ -121,6 +121,7 @@ SA-SCREENER 완료 → SA-FOUNDATION 완료 → SA-MODULE-ENTRY · SA-MODULE-TRA
 - `blacklist`: 자동 선정됐더라도 강제 제외
 - 파일이 없으면 자동 선정 결과만 사용
 - **텔레그램 봇으로 즉시 추가/제거 가능**: `/add CODE NAME`·`/remove CODE`·`/block CODE NAME`·`/unblock CODE` (다음 09:05 배치까지 기다리지 않고 즉시 `dynamic_watchlist.json`까지 갱신됨)
+- **`/block`과 보유 종목**: 보유 중인 종목을 블랙리스트에 추가하면 추가 매수(피라미딩)뿐만 아니라 **손절·익절 감시까지 모두 중단**됨(수동 매도 전용). `/unblock` 시 매도 감시 자동 재개; 추가 매수 재개는 `/add` 별도 실행 필요
 
 **자동 제외 조건 (API 비트마스크 + 코드 후처리):**
 - ETF·ETN·관리종목·투자경고·투자위험·우선주 → API 파라미터로 제거
@@ -244,7 +245,7 @@ journalctl -u ls_telegram_listener -f        # 실시간 로그
 | `/unblock CODE` | 블랙리스트 해제 |
 | `/list [white\|black]` | 화이트/블랙리스트 표시 |
 | `/watch` | 오늘 감시 중인 종목 (점수순) |
-| `/held` | 보유 종목 + 평균가/수익률/손절가 |
+| `/held` | 보유 종목 + 평균가/수익률/손절가(도달 시 손익 포함)/피라미딩 대기 사유 |
 | `/balance` | 계좌 잔고 (총자본/예수금/손익) |
 | `/status` | 시스템 상태 |
 | `/help` | 명령어 안내 |
@@ -257,5 +258,9 @@ journalctl -u ls_telegram_listener -f        # 실시간 로그
 
 ---
 
-> 마지막 업데이트: 2026-05-30 (손절 기준 변경 — 마지막 매수가 - 2N(고정) → 매수 후 최고가 - 2N(트레일링). `held_stock_record.json`에 `high_since_entry` 필드 추가. `risk_guardian.py`가 10분 주기로 최고가 갱신 및 손절가 자동 상향)
+> 마지막 업데이트: 2026-06-03
+> - `/block` 보유 종목: 추가 매수(피라미딩) + 손절·익절 감시 모두 중단 (수동 매도 전용). `/unblock` 시 매도 감시 자동 재개
+> - `target_manager.py`: `turtle_s1/s2_first_breakout_at`(최초 신고가 돌파 시각) 필드 추가 — 신호 소멸 시 초기화
+> - `turtle_order_logic.py`: 진입 텔레그램 메시지에 "돌파→매수 소요시간" 추가
+> - `telegram_commands.py`: `/held`에서 손절가 옆 "도달 시 손익" 표시, 피라미딩 대기 사유(블랙리스트/유닛 한도/테마 한도/매수금 상한) 표시
 
