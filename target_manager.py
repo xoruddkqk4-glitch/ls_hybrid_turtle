@@ -113,11 +113,13 @@ def initialize_unheld_record(watchlist: dict):
                 "turtle_s1_peak_price":  None,   # S1 돌파 후 장중 최고값
                 "turtle_s1_peak_locked": False,  # S1 최고값 잠금 여부 (눌림 시작)
                 "turtle_s1_entry_ready": False,  # S1 풀백 재돌파 진입 조건 충족
+                "turtle_s1_first_breakout_at": None,  # S1 최초 돌파(신고가 상회) 시각
                 "turtle_s1_locked_at":   None,   # S1 최고값 잠금(눌림 시작) 시각
                 "turtle_s2_peak_price":  None,   # S2 동일
                 "turtle_s2_peak_locked": False,
                 "turtle_s2_entry_ready": False,
                 "turtle_s2_locked_at":   None,
+                "turtle_s2_first_breakout_at": None,
             }
             print(f"[target_manager] {name}({code}) 초기화")
 
@@ -204,6 +206,9 @@ def run_update(held_codes: Optional[Set[str]] = None):
             turtle_s1 = s1_high > 0 and current_price > s1_high
             turtle_s2 = s2_high > 0 and current_price > s2_high
 
+            # 최초 돌파 시각 기록용 현재 시각 문자열 (이번 주기 공통 사용)
+            now_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+
             if code not in unheld_record:
                 # 처음 등록 — 신호 상태로 peak 초기값 결정
                 unheld_record[code] = {
@@ -214,10 +219,13 @@ def run_update(held_codes: Optional[Set[str]] = None):
                     "turtle_s1_peak_locked": False,
                     "turtle_s1_entry_ready": False,
                     "turtle_s1_locked_at":   None,
+                    # 처음 등록 시점에 신호가 True이면 돌파 시각도 함께 기록
+                    "turtle_s1_first_breakout_at": now_str if turtle_s1 else None,
                     "turtle_s2_peak_price":  current_price if turtle_s2 else None,
                     "turtle_s2_peak_locked": False,
                     "turtle_s2_entry_ready": False,
                     "turtle_s2_locked_at":   None,
+                    "turtle_s2_first_breakout_at": now_str if turtle_s2 else None,
                 }
             else:
                 # 구버전 호환: 새 필드가 없는 JSON 대비 기본값으로 초기화
@@ -225,12 +233,18 @@ def run_update(held_codes: Optional[Set[str]] = None):
                 unheld_record[code].setdefault("turtle_s1_peak_locked", False)
                 unheld_record[code].setdefault("turtle_s1_entry_ready", False)
                 unheld_record[code].setdefault("turtle_s1_locked_at",   None)
+                unheld_record[code].setdefault("turtle_s1_first_breakout_at", None)
                 unheld_record[code].setdefault("turtle_s2_peak_price",  None)
                 unheld_record[code].setdefault("turtle_s2_peak_locked", False)
                 unheld_record[code].setdefault("turtle_s2_entry_ready", False)
                 unheld_record[code].setdefault("turtle_s2_locked_at",   None)
+                unheld_record[code].setdefault("turtle_s2_first_breakout_at", None)
 
                 # S1 신호 업데이트 + 풀백 상태 관리
+                # 직전에 신호가 꺼져 있었는데 이번에 켜졌으면(=최초 돌파) 돌파 시각 기록
+                prev_s1_signal = unheld_record[code]["turtle_s1_signal"]
+                if turtle_s1 and not prev_s1_signal:
+                    unheld_record[code]["turtle_s1_first_breakout_at"] = now_str
                 unheld_record[code]["turtle_s1_signal"] = turtle_s1
                 if turtle_s1:
                     s1_peak   = unheld_record[code]["turtle_s1_peak_price"]
@@ -258,8 +272,13 @@ def run_update(held_codes: Optional[Set[str]] = None):
                     unheld_record[code]["turtle_s1_peak_locked"] = False
                     unheld_record[code]["turtle_s1_entry_ready"] = False
                     unheld_record[code]["turtle_s1_locked_at"]   = None
+                    unheld_record[code]["turtle_s1_first_breakout_at"] = None
 
                 # S2 신호 업데이트 + 풀백 상태 관리 (S1과 동일 구조)
+                # 직전에 신호가 꺼져 있었는데 이번에 켜졌으면(=최초 돌파) 돌파 시각 기록
+                prev_s2_signal = unheld_record[code]["turtle_s2_signal"]
+                if turtle_s2 and not prev_s2_signal:
+                    unheld_record[code]["turtle_s2_first_breakout_at"] = now_str
                 unheld_record[code]["turtle_s2_signal"] = turtle_s2
                 if turtle_s2:
                     s2_peak   = unheld_record[code]["turtle_s2_peak_price"]
@@ -282,6 +301,7 @@ def run_update(held_codes: Optional[Set[str]] = None):
                     unheld_record[code]["turtle_s2_peak_locked"] = False
                     unheld_record[code]["turtle_s2_entry_ready"] = False
                     unheld_record[code]["turtle_s2_locked_at"]   = None
+                    unheld_record[code]["turtle_s2_first_breakout_at"] = None
 
             # 로그 출력 (터틀 신호 및 풀백 상태 한눈에 보기)
             name = watchlist.get(code, {}).get("name", code)

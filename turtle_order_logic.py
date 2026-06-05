@@ -28,6 +28,9 @@
 import json
 import os
 import time
+from datetime import datetime
+
+import pytz
 
 import ls_client
 import indicator_calc
@@ -35,6 +38,38 @@ import trade_ledger
 import telegram_alert
 import sector_cache
 from config import get_watchlist
+
+# 한국 표준시 (KST, UTC+9)
+_KST = pytz.timezone("Asia/Seoul")
+
+
+def _format_elapsed(start_str: str) -> str:
+    """돌파 시각(문자열)부터 지금까지 경과 시간을 사람이 읽기 쉬운 형식으로 돌려준다.
+
+    Args:
+        start_str: "%Y-%m-%d %H:%M:%S" 형식의 돌파 시각 문자열 (KST 기준)
+
+    Returns:
+        경과 시간 문자열 (예: "1시간 23분", "45분", "1분 미만").
+        파싱 실패 시 "정보 없음".
+    """
+    if not start_str:
+        return "정보 없음"
+    try:
+        start = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S")
+        now   = datetime.now(_KST).replace(tzinfo=None)
+        seconds = int((now - start).total_seconds())
+        if seconds < 0:
+            return "0분"
+        if seconds < 60:
+            return "1분 미만"
+        if seconds < 3600:
+            return f"{seconds // 60}분"
+        hours = seconds // 3600
+        mins  = (seconds % 3600) // 60
+        return f"{hours}시간 {mins}분"
+    except Exception:
+        return "정보 없음"
 
 # 보유 종목 상태 파일 경로 (스크립트 위치 기준 절대 경로)
 _DIR = os.path.dirname(os.path.abspath(__file__))
@@ -249,7 +284,8 @@ def place_entry_order(
     code: str, qty: int, price: int, atr_n: float,
     entry_type: str, max_unit: int,
     entry_source: str = "TURTLE_S1",
-    effective_risk_factor=None
+    effective_risk_factor=None,
+    first_breakout_at: str = ""
 ):
     """1차 진입 주문을 실행하고 포지션 상태를 기록한다.
 
@@ -273,6 +309,7 @@ def place_entry_order(
         entry_type:   "NORMAL" 또는 "EXCEPTION"
         max_unit:     최대 Unit 횟수 (4 또는 2)
         entry_source: 진입 경로 ("TURTLE_S1" / "TURTLE_S2")
+        first_breakout_at: 최초 신고가 돌파 시각 문자열 (돌파~매수 소요시간 안내용, 없으면 빈 문자열)
     """
     # ① 안전장치: 감시 종목이 아니면 절대 주문하지 않음
     watchlist = get_watchlist()
@@ -346,12 +383,15 @@ def place_entry_order(
         "TURTLE_S2": "터틀S2(55일신고가)",
         "TURTLE_S1": "터틀S1(20일신고가)",
     }.get(entry_source, entry_source)
+    # 최초 돌파부터 실제 매수까지 걸린 시간 (돌파 → 널림 → 재돌파 → 매수 과정의 총 소요)
+    elapsed_str = _format_elapsed(first_breakout_at)
     telegram_alert.SendMessage(
         f"✅ 터틀 진입\n"
         f"종목: {name}({code})\n"
         f"수량: {qty:,}주 @{price:,}원\n"
         f"진입 경로: {source_label} / 유형: {entry_type} (최대 {max_unit} Unit)\n"
-        f"손절가: {stop_loss_price:,}원 | 다음 피라미딩: {next_pyramid_price:,}원"
+        f"손절가: {stop_loss_price:,}원 | 다음 피라미딩: {next_pyramid_price:,}원\n"
+        f"돌파→매수 소요: {elapsed_str} (최초 신고가 돌파 후 재돌파까지)"
     )
 
 
@@ -510,6 +550,14 @@ def run_orders(entry_signals: list):
     # 현재가 한 번에 조회
     prices = ls_client.get_multi_price(price_query_codes)
 
+    # 돌파~매수 소요시간 계산용: 미보유 종목의 최초 돌파 시각이 담긴 unheld_record 로드
+    try:
+        import target_manager
+        unheld_record = target_manager.load_unheld_record()
+    except Exception as e:
+        print(f"[turtle] unheld_record 로드 오류(돌파 시각 안내 생략): {e}")
+        unheld_record = {}
+
     # ─────────────────────────────────────
     # [A] 신규 진입 처리
     # ─────────────────────────────────────
@@ -567,8 +615,16 @@ def run_orders(entry_signals: list):
                   f"(테마: {entry_sector}, 현재 {sector_units} Unit)")
             continue
 
-        # 진입 주문 실행 (진입 경로 전달)
-        place_entry_order(code, qty, current_price, atr_n, entry_type, max_unit, entry_source, effective_rf)
+        # 최초 돌파 시각 조회 (진입 경로에 따라 S1/S2 필드 구분)
+        # → 돌파→매수 소요시간을 진입 메시지에 넣기 위함
+        breakout_key = ("turtle_s2_first_breakout_at"
+                        if entry_source == "TURTLE_S2"
+                        else "turtle_s1_first_breakout_at")
+        first_breakout_at = unheld_record.get(code, {}).get(breakout_key, "") or ""
+
+        # 진입 주문 실행 (진입 경로 + 돌파 시각 전달)
+        place_entry_order(code, qty, current_price, atr_n, entry_type, max_unit,
+                          entry_source, effective_rf, first_breakout_at)
 
     # ─────────────────────────────────────
     # [B] 기존 포지션 피라미딩 처리

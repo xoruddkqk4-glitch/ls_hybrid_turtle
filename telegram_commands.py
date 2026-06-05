@@ -609,16 +609,21 @@ def handle_held(args: list) -> str:
         lines.append(f"  평균가: {int(avg):,}원")
         lines.append(f"  수익률: {sign}{pnl_pct:.2f}% ({sign}{pnl_amt:,}원)")
         if stop > 0:
-            lines.append(f"  손절가: {stop:,}원")
+            # 손절가에 도달해 전량 매도되면 실현되는 손익 = (손절가 - 평균가) × 수량
+            # 트레일링 손절로 손절가가 평균가 위로 올라가면 +수익이 될 수 있음
+            stop_pnl  = int((stop - avg) * qty) if avg > 0 else 0
+            stop_sign = "+" if stop_pnl >= 0 else ""
+            stop_label = "이익 확정" if stop_pnl >= 0 else "손실"
+            lines.append(f"  손절가: {stop:,}원 (도달 시 {stop_sign}{stop_pnl:,}원 {stop_label})")
         lines.append(f"  현재가: {int(cur):,}원")
         if next_pyramid > 0:
             if unit >= max_unit:
                 lines.append("  피라미딩: 완료")
             elif cur >= next_pyramid:
-                # 현재가가 피라미딩가를 이미 넘었는데도 추가 매수가 안 일어난 경우
+                # 현재가가 피라미딩가보다 높은데도 추가 매수가 아직 안 일어난 경우
                 # → 막힌 이유를 찾아 함께 안내한다 (사용자 혼란 방지)
                 reason = _diagnose_pyramid_block(code, cur, held, total_capital)
-                lines.append(f"  피라미딩가: {next_pyramid:,}원 (현재가가 이미 초과)")
+                lines.append(f"  피라미딩가: {next_pyramid:,}원 (현재가가 이미 넘음 → 매수 대기)")
                 if reason:
                     lines.append(f"  └ 추가 매수 대기 사유: {reason}")
                 else:
