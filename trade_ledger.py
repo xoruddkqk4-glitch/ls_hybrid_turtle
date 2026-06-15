@@ -39,6 +39,7 @@ VALID_SOURCES = {
     "ENTRY_30MIN", "ENTRY_S1", "ENTRY_S2",   # 매수 — 신규 진입
     "PYRAMID",                                 # 매수 — 피라미딩
     "EXIT_STOP", "EXIT_10LOW", "EXIT_5MA",    # 매도 — 청산
+    "EXIT_PARTIAL_5", "EXIT_PARTIAL_10",       # 매도 — 부분 익절
     "MANUAL_SYNC",                             # 수동 동기화
 }
 
@@ -310,6 +311,8 @@ def append_trade(record: dict):
             "EXIT_STOP":   "손절(2N하드)",
             "EXIT_10LOW":  "익절(10일신저가)",
             "EXIT_5MA":    "익절(5MA)",
+            "EXIT_PARTIAL_5": "익절(5%부분)",
+            "EXIT_PARTIAL_10": "익절(10%부분)",
             "MANUAL_SYNC": "수동 동기화",
         }.get(src, src)
 

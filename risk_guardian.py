@@ -93,8 +93,9 @@ def _is_stop_blackout() -> bool:
     if 900 <= hhmm < 930:
         return True
 
-    # 15:00~15:30: 장 마감 직전 변동성 구간
-    if 1500 <= hhmm < 1530:
+    # 15:00~15:40: 장 마감 변동성 구간
+    # crontab을 15:30·15:40까지 연장하므로 해당 실행분에서도 하드 손절을 보류한다.
+    if 1500 <= hhmm < 1540:
         return True
 
     return False
@@ -129,13 +130,13 @@ def check_hard_stop(code: str, current_price: int, pos: dict) -> bool:
     if current_price <= stop_loss_price:
         name = _get_stock_name(code)
 
-        # 장 변동성 시간대(09:00~09:30, 15:00~15:30)에는 손절을 보류한다
+        # 장 변동성 시간대(09:00~09:30, 15:00~15:40)에는 손절을 보류한다
         # 이 시간대의 급락은 일시적인 경우가 많아 종가가 회복되기도 함
         if _is_stop_blackout():
             now_str = datetime.now(_KST).strftime("%H:%M")
             # 09:00~09:30이면 "장 시작 직후", 15:00~15:30이면 "장 마감 직전"으로 구분
             now_hhmm = datetime.now(_KST).hour * 100 + datetime.now(_KST).minute
-            period   = "장 시작 직후(09:00~09:30)" if now_hhmm < 1000 else "장 마감 직전(15:00~15:30)"
+            period   = "장 시작 직후(09:00~09:30)" if now_hhmm < 1000 else "장 마감(15:00~15:40)"
             msg = (
                 f"[!] 2N 손절 조건 발동 (보류 중)\n"
                 f"종목: {name}({code})\n"
@@ -221,7 +222,7 @@ def check_trailing_stop(code: str, current_price: int, pos: dict, indicators: di
 # 청산 주문 실행
 # ─────────────────────────────────────────
 
-def place_exit_order(code: str, qty: int, reason: str, current_price: int = 0):
+def place_exit_order(code: str, qty: int, reason: str, current_price: int = 0, position_state: Optional[dict] = None):
     """전량 매도 주문을 실행하고 포지션을 청산한다.
 
     실행 순서:
@@ -275,7 +276,8 @@ def place_exit_order(code: str, qty: int, reason: str, current_price: int = 0):
     order_no = result["order_no"]
 
     # ③ held_stock_record.json 내용에서 해당 종목 삭제 (포지션 청산 완료)
-    position_state = load_position_state()
+    if position_state is None:
+        position_state = load_position_state()
     removed_pos    = position_state.pop(code, {})
     save_position_state(position_state)
 
@@ -342,6 +344,119 @@ def place_exit_order(code: str, qty: int, reason: str, current_price: int = 0):
         f"실수령금액: {net_amount:,}원\n"
         f"사유: {reason}"
     )
+
+
+def place_partial_exit_order(code: str, qty: int, reason: str, current_price: int, tp_type: str, position_state: dict) -> bool:
+    """일부 매도 주문을 실행하고 포지션을 업데이트한다 (분할 익절용).
+
+    Args:
+        code:           종목코드 6자리
+        qty:           매도할 수량 (내림 정수 계산된 값)
+        reason:        매도 사유 (예: "5% 분할 익절", "10% 분할 익절")
+        current_price: 현재가 (체결 예상 단가)
+        tp_type:       익절 단계 ("5" 또는 "10")
+        position_state: 현재 보유 종목 상태 딕셔너리 (동기화를 위해 레퍼런스로 받음)
+    """
+    # ① 안전장치: 감시 목록에도 없고 보유 기록에도 없는 종목은 매도 주문 거부
+    watchlist = get_watchlist()
+    if code not in watchlist:
+        if code not in position_state:
+            print(f"[risk_guardian] {code} 감시 종목 외 + 보유 기록 없음 → 부분 매도 주문 거부")
+            return False
+
+    name = _get_stock_name(code)
+    before_qty = ls_client.get_holding_qty(code)
+
+    if qty <= 0:
+        print(f"[risk_guardian] {name}({code}) 부분 매도 수량=0 → 스킵")
+        return False
+
+    # ② 부분 매도 주문 실행
+    result = ls_client.place_order(code, qty, "SELL", "MARKET")
+    if not result["success"]:
+        print(
+            f"[risk_guardian] 부분 청산 주문 실패: {name}({code}) {qty}주 "
+            f"| 사유: {reason} | 오류: {result['message']}"
+        )
+        return False
+
+    fill = ls_client.wait_for_order_fill(code, "SELL", before_qty, qty)
+    if not fill["filled"]:
+        print(
+            f"[risk_guardian] 부분 청산 체결 미확정 → 기록/알림 스킵: {name}({code}) "
+            f"(요청 {qty}주, 확인 {fill['filled_qty']}주)"
+        )
+        return False
+
+    order_no = result["order_no"]
+    filled_qty = fill["filled_qty"]
+
+    # ③ held_stock_record.json 내용 업데이트
+    pos = position_state[code]
+    pos["total_qty"] = max(0, pos.get("total_qty", 0) - filled_qty)
+
+    # 익절 완료 플래그 설정 (10% 완료 시 5%도 함께 완료 처리하여 갭상승 예외 지원)
+    if tp_type == "5":
+        pos["tp_5_executed"] = True
+    elif tp_type == "10":
+        pos["tp_5_executed"] = True
+        pos["tp_10_executed"] = True
+
+    # 만약 남은 수량이 0이 되면 포지션 완전히 삭제 (방어 코드)
+    if pos["total_qty"] <= 0:
+        position_state.pop(code, None)
+        print(f"[risk_guardian] {name}({code}) 남은 수량 0주 → 포지션 청산 삭제")
+    
+    save_position_state(position_state)
+
+    # ④ 체결 원장 기록
+    avg_buy_price = pos.get("avg_buy_price", 0)
+    sell_price = current_price if current_price > 0 else avg_buy_price
+
+    if avg_buy_price > 0 and sell_price > 0:
+        profit_rate = round((sell_price - avg_buy_price) / avg_buy_price * 100, 2)
+    else:
+        profit_rate = 0.0
+
+    profit_amount = int((sell_price - avg_buy_price) * filled_qty) if avg_buy_price > 0 else 0
+
+    exit_source = "EXIT_PARTIAL_5" if tp_type == "5" else "EXIT_PARTIAL_10"
+
+    trade_ledger.append_trade({
+        "side":          "SELL",
+        "stock_code":    code,
+        "stock_name":    name,
+        "qty":           filled_qty,
+        "unit_price":    sell_price,
+        "order_no":      order_no,
+        "order_type":    "MARKET",
+        "source":        exit_source,
+        "profit_rate":   profit_rate,
+        "profit_amount": profit_amount,
+        "note":          reason,
+    })
+
+    # ⑤ 텔레그램 알림
+    is_loss = profit_rate < 0
+    emoji = "[-]" if is_loss else "[+]"
+    profit_sign = "+" if profit_rate >= 0 else ""
+    amount_sign = "+" if profit_amount >= 0 else ""
+
+    gross_amount = sell_price * filled_qty
+    fee_total = int(gross_amount * (trade_ledger.LS_BROKER_FEE_RATE + trade_ledger.SELL_TAX_RATE))
+    net_amount = gross_amount - fee_total
+
+    telegram_alert.SendMessage(
+        f"{emoji} 포지션 부분 익절\n"
+        f"종목: {name}({code})\n"
+        f"수량: {filled_qty:,}주 (남은 수량: {pos.get('total_qty', 0):,}주)\n"
+        f"평균 매입가: {avg_buy_price:,}원 → 매도가: {sell_price:,}원\n"
+        f"수익률: {profit_sign}{profit_rate:.2f}%\n"
+        f"수익금: {amount_sign}{profit_amount:,}원\n"
+        f"실수령금액: {net_amount:,}원\n"
+        f"사유: {reason}"
+    )
+    return True
 
 
 # ─────────────────────────────────────────
@@ -512,9 +627,44 @@ def run_guardian(balance: Optional[list] = None) -> Set[str]:
               f"| 매도기준: {sell_trigger_str} "
               f"| 피라미딩가: {pyramid_str}")
 
+        # ── 분할 익절 감시 (5% / 10% TP) ──────────────────────────────────
+        if avg_buy_price > 0:
+            profit_rate = (current_price - avg_buy_price) / avg_buy_price * 100
+            
+            # 1) 10% 이상 돌파 시 (2차 익절 또는 갭상승 예외)
+            if profit_rate >= 10.0 and not pos.get("tp_10_executed", False):
+                # 갭상승 등으로 5% 익절을 거치지 않은 경우에도 10% 부분 익절만 실행(33% 매도)
+                sell_qty = int(holding_qty * 0.33)
+                if sell_qty > 0:
+                    success = place_partial_exit_order(code, sell_qty, "10% 분할 익절", current_price, "10", position_state)
+                    if success:
+                        if code not in position_state:
+                            held_codes_after_guard.discard(code)
+                        continue  # 이번 회차의 추가 청산 감시는 건너뜀
+                else:
+                    # 수량이 적어 내림 계산 시 0주인 경우 스킵 및 완료 처리
+                    print(f"[risk_guardian] {name}({code}) 수량 부족(내림 계산 0주)으로 10% 분할 익절 스킵")
+                    pos["tp_5_executed"] = True
+                    pos["tp_10_executed"] = True
+                    save_position_state(position_state)
+            
+            # 2) 5% 이상 돌파 시 (1차 익절)
+            elif profit_rate >= 5.0 and not pos.get("tp_5_executed", False):
+                sell_qty = int(holding_qty * 0.25)
+                if sell_qty > 0:
+                    success = place_partial_exit_order(code, sell_qty, "5% 분할 익절", current_price, "5", position_state)
+                    if success:
+                        if code not in position_state:
+                            held_codes_after_guard.discard(code)
+                        continue
+                else:
+                    print(f"[risk_guardian] {name}({code}) 수량 부족(내림 계산 0주)으로 5% 분할 익절 스킵")
+                    pos["tp_5_executed"] = True
+                    save_position_state(position_state)
+
         # ④ 하드 손절 먼저 확인 (최우선)
         if check_hard_stop(code, current_price, pos):
-            place_exit_order(code, sellable_qty, "2N 하드 손절", current_price)
+            place_exit_order(code, sellable_qty, "2N 하드 손절", current_price, position_state)
             held_codes_after_guard.discard(code)
             continue  # 이미 청산됐으므로 트레일링 스탑은 확인 불필요
 
@@ -523,7 +673,7 @@ def run_guardian(balance: Optional[list] = None) -> Set[str]:
             try:
                 exit_reason = check_trailing_stop(code, current_price, pos, indicators)
                 if exit_reason:
-                    place_exit_order(code, sellable_qty, exit_reason, current_price)
+                    place_exit_order(code, sellable_qty, exit_reason, current_price, position_state)
                     held_codes_after_guard.discard(code)
             except Exception as e:
                 print(f"[risk_guardian] {code} 트레일링 스탑 확인 오류: {e}")

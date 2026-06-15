@@ -240,6 +240,8 @@ def run_balance_sync(actual_list: Optional[list] = None) -> bool:
                 "source":                "MANUAL_SYNC",  # 수동 편입 표시
                 "effective_risk_factor": None,   # 수동 편입은 리스크팩터 없음 (피라미딩 불가)
                 "high_since_entry":      avg_price,  # 평균매입가를 최고가 시작점으로 (트레일링 손절 기준)
+                "tp_5_executed":         False,      # 5% 분할 익절 여부
+                "tp_10_executed":        False,      # 10% 분할 익절 여부
             }
             changed = True
 

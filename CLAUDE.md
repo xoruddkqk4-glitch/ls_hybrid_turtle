@@ -66,9 +66,9 @@
 | `config.py` | `get_watchlist()` — `dynamic_watchlist.json`을 읽어 감시 종목 반환 |
 | `target_manager.py` | 미보유 종목 터틀 신호(`turtle_s1/s2_signal`) 및 풀백 상태(`peak_price·peak_locked·entry_ready`) 갱신. 신호가 처음 켜질 때 `turtle_s1/s2_first_breakout_at`(최초 돌파 시각) 기록 |
 | `timer_agent.py` | 풀백 재돌파 진입 신호 체크 (`entry_ready` + 10시 필터) |
-| `turtle_order_logic.py` | 리스크 기반 Unit 수량 계산, 피라미딩 주문, 예외 진입 처리. 진입 메시지에 돌파→매수 소요시간 포함 |
-| `risk_guardian.py` | 2N 하드 손절 및 트레일링 스탑 실시간 감시 |
-| `balance_sync.py` | 실행 시작 시 실제 잔고 ↔ held_stock_record.json 동기화 — 수동 매수 종목 발견 시 1회 알림 후 자동 편입 (매도 전략만 감시). 잔고 불일치 종목은 `ls_client.get_today_executions()`(t0425)로 당일 체결을 받아와 원장에 없는 것만 `MANUAL_SYNC`로 기록 (매도는 수익률·수익금 계산, order_no로 중복 방지) |
+| `turtle_order_logic.py` | 리스크 기반 Unit 수량 계산, 피라미딩 주문, 예외 진입 처리. 진입 시 분할 익절 플래그 초기화 및 구버전 호환 처리 |
+| `risk_guardian.py` | 2N 하드 손절, 5%/10% 분할 익절 및 갭상승 예외 처리, 트레일링 스탑 실시간 감시 |
+| `balance_sync.py` | 실행 시작 시 실제 잔고 ↔ held_stock_record.json 동기화 — 수동 매수 종목 발견 시 1회 알림 후 자동 편입 (매도 전략만 감시). 잔고 불일치 종목은 `ls_client.get_today_executions()`(t0425)로 당일 체결을 받아와 원장에 없는 것만 `MANUAL_SYNC`로 기록 (매도는 수익률·수익금 계산, order_no로 중복 방지, 분할 익절 플래그 초기화 지원) |
 | `chart_updater.py` | 구글 시트 "포트폴리오 추이" 데이터로 "손익차트" 탭에 콤보 차트(일일 막대 + 누적 선) 자동 생성 — 일별 데이터를 일/주/월/분기/년 5단위로 집계해 숨김 시트("차트데이터")에 저장, F1 드롭다운으로 기간 단위 선택 시 차트 자동 전환 (선택값은 재생성 시에도 유지) |
 | `sector_cache.py` | 종목별 테마 캐시 관리 (t1532 API, sector_cache.json) |
 | `daily_chart_cache.py` | 일봉 캐시 관리 — 09:05 1회 빌드 후 당일 재사용 |
@@ -90,7 +90,7 @@
 | `dynamic_watchlist.json` | 09:05 배치 최종 감시 종목 50개 — 모든 모듈이 이 파일을 참조 |
 | `watchlist_config.json` | 수동 화이트리스트/블랙리스트 (없으면 자동 선정만 사용) |
 | `unheld_stock_record.json` | 미보유 종목의 터틀 신호(`turtle_s1/s2_signal`)·최초 돌파 시각(`turtle_s1/s2_first_breakout_at`)·풀백 상태(`peak_price·peak_locked·entry_ready`) |
-| `held_stock_record.json` | 보유 종목의 Unit 수·마지막 매수가·손절가·피라미딩 트리거가·종목별 유효 리스크팩터(`effective_risk_factor`)·매수 후 최고가(`high_since_entry`) |
+| `held_stock_record.json` | 보유 종목의 Unit 수·마지막 매수가·손절가·피라미딩 트리거가·종목별 유효 리스크팩터(`effective_risk_factor`)·매수 후 최고가(`high_since_entry`)·분할 익절 플래그 |
 | `trade_ledger.json` | 체결 원장 전체 기록 |
 | `sector_cache.json` | 종목별 테마 캐시 (t1532 API 결과) |
 | `daily_chart_cache.json` | 일봉(60개) 캐시 — 09:05 market_open 직후 생성 |
@@ -258,7 +258,10 @@ journalctl -u ls_telegram_listener -f        # 실시간 로그
 
 ---
 
-> 마지막 업데이트: 2026-06-03
+> 마지막 업데이트: 2026-06-15
+> - `risk_guardian.py`: 5%/10% 분할 익절 로직 및 갭상승 예외 처리(10% 도달 시 33%만 익절 및 완료 처리) 추가. 내림(Floor) 계산 매도 수량 및 0주 무시 보정 적용.
+> - `turtle_order_logic.py` & `balance_sync.py`: 포지션 진입 및 수동 동기화 편입 시 `tp_5_executed`, `tp_10_executed` 익절 플래그 초기화.
+> - `trade_ledger.py`: 부분 익절 구분을 위한 `"EXIT_PARTIAL_5"`, `"EXIT_PARTIAL_10"` 매매 구분코드 추가.
 > - `/block` 보유 종목: 추가 매수(피라미딩) + 손절·익절 감시 모두 중단 (수동 매도 전용). `/unblock` 시 매도 감시 자동 재개
 > - `target_manager.py`: `turtle_s1/s2_first_breakout_at`(최초 신고가 돌파 시각) 필드 추가 — 신호 소멸 시 초기화
 > - `turtle_order_logic.py`: 진입 텔레그램 메시지에 "돌파→매수 소요시간" 추가

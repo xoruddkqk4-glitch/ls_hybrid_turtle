@@ -93,6 +93,10 @@ def load_position_state() -> dict:
             with open(HELD_STOCK_RECORD_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, dict):
+                # 구버전 세션 호환을 위해 분할 익절 플래그 기본값 설정
+                for pos in data.values():
+                    pos.setdefault("tp_5_executed", False)
+                    pos.setdefault("tp_10_executed", False)
                 return data
         except (json.JSONDecodeError, IOError):
             print(f"[turtle] {HELD_STOCK_RECORD_FILE} 읽기 오류 → 빈 상태로 시작")
@@ -354,6 +358,8 @@ def place_entry_order(
         "entry_source":          entry_source,           # 진입 경로 (TURTLE_S1 / TURTLE_S2)
         "effective_risk_factor": effective_risk_factor,  # 종목별 유효 리스크팩터 (피라미딩 수량 계산에 재사용)
         "high_since_entry":      price,                  # 매수 후 장중 최고가 — 트레일링 손절 기준 (risk_guardian이 갱신)
+        "tp_5_executed":         False,                  # 5% 분할 익절 여부
+        "tp_10_executed":        False,                  # 10% 분할 익절 여부
     }
     save_position_state(position_state)
 
