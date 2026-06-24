@@ -8,10 +8,10 @@
 #
 # 두 가지 청산 조건:
 #
-#   [1] 하드 손절 (트레일링 2N Stop — 최우선 처리)
-#       현재가 ≤ stop_loss_price (매수 후 최고가 - 2×ATR)
-#       → 매 실행 시 현재가가 최고가를 넘으면 high_since_entry를 갱신하고
-#          high_since_entry - 2N이 기존 손절가보다 높으면 손절가를 자동으로 올린다.
+#   [1] 하드 손절 (고정 2N Stop — 최우선 처리)
+#       현재가 ≤ stop_loss_price (마지막 매수가 - 2×ATR)
+#       → 진입 또는 피라미딩(추가 매수) 시점에 계산되어 저장된 고정 손절가를 사용하며,
+#          장중에 주가가 상승하더라도 손절가를 추가로 상향하지 않는다.
 #       → 즉시 전량 매도
 #
 #   ※ 블랙리스트(/block) 종목은 아래 두 조건을 모두 건너뛴다 (매도 감시 완전 중단).
@@ -562,9 +562,10 @@ def run_guardian(balance: Optional[list] = None) -> Set[str]:
         day10_low = indicators.get("day10_low", 0)
         ma5       = indicators.get("ma5", 0.0)
 
-        # ── 매수 후 최고가 갱신 및 트레일링 손절가 상향 ──────────────────────────
-        # 현재가가 매수 후 최고가를 넘으면 최고가를 갱신하고,
-        # 최고가 - 2N이 기존 손절가보다 높아지면 손절가를 자동으로 올린다.
+        # ── 매수 후 최고가 갱신 및 고정 손절가 유지 ──────────────────────────────
+        # 현재가가 매수 후 최고가를 넘으면 최고가를 갱신하여 기록한다.
+        # 오리지널 터틀 방식(고정 손절)을 따르므로, 장중에 손절가(stop_loss_price)를 올리지 않고
+        # 진입/피라미딩 시점에 계산되어 저장된 손절가를 고정하여 사용한다.
         atr_n            = indicators.get("atr", 0.0)
         # high_since_entry 없는 구버전 기록은 last_buy_price를 시작점으로 사용
         high_since_entry = pos.get("high_since_entry", pos.get("last_buy_price", 0))
@@ -576,22 +577,15 @@ def run_guardian(balance: Optional[list] = None) -> Set[str]:
             high_since_entry        = current_price
             _updated                = True
 
-        if atr_n > 0 and high_since_entry > 0:
-            # 최고가 - 2N 계산 → 기존 손절가보다 높으면 손절가 상향
-            trailing_stop = int(high_since_entry - 2 * atr_n)
-            if trailing_stop > pos.get("stop_loss_price", 0):
-                pos["stop_loss_price"] = trailing_stop
-                _updated               = True
-
         if _updated:
             save_position_state(position_state)
 
-        # 트레일링으로 손절가가 올라갔을 수 있으므로 최신값으로 재취득 (표시·체크에 반영)
+        # 손절가는 진입/피라미딩 시 계산되어 저장된 값을 고정하여 사용함
         stop_loss_price_val = pos.get("stop_loss_price", 0)
         # ─────────────────────────────────────────────────────────────────────
 
         # 매도 기준 후보 3가지를 모은 뒤 "가장 높은 가격"을 가장 먼저 닿는 매도 신호로 표시한다
-        # ① 2N 손절: stop_loss_price (트레일링으로 상향될 수 있음, 손실·수익 무관 적용)
+        # ① 2N 손절: stop_loss_price (진입/피라미딩 시점에 계산된 고정값, 손실·수익 무관 적용)
         # ② 10일 신저가: day10_low (손실·수익 무관 적용)
         # ③ 5MA: ma5 (수익권 = 현재가 > 평균가일 때만 매도 신호로 작동)
         sell_trigger_candidates = []
