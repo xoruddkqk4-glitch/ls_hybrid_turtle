@@ -360,6 +360,31 @@ def run_update(held_codes: Optional[Set[str]] = None):
             _update_guard_status(pos, "turtle_s1", current_price, atr_val, 1200, now_str, name)
             _update_guard_status(pos, "turtle_s2", current_price, atr_val, 1200, now_str, name)
 
+            # 콘솔 감시 로그 추가 (현재가 / S1돌파값 / S2돌파값 및 가드 진행률)
+            s1_tgt = pos.get("turtle_s1_target_price", s1_high)
+            s2_tgt = pos.get("turtle_s2_target_price", s2_high)
+            
+            def _get_status_desc(prefix):
+                sig = pos.get(f"{prefix}_signal", False)
+                ready = pos.get(f"{prefix}_entry_ready", False)
+                if ready:
+                    return "안착"
+                if sig:
+                    b_at = pos.get(f"{prefix}_breakout_at")
+                    try:
+                        elapsed = (datetime.strptime(now_str, "%Y-%m-%d %H:%M:%S") - 
+                                   datetime.strptime(b_at, "%Y-%m-%d %H:%M:%S")).total_seconds()
+                        return f"가드중({elapsed/60:.1f}분)"
+                    except Exception:
+                        return "가드중"
+                return "대기"
+
+            s1_status = _get_status_desc("turtle_s1")
+            s2_status = _get_status_desc("turtle_s2")
+
+            print(f"[target_manager] {name}({code}) 현재가:{current_price:,}원 | "
+                  f"S1목표:{s1_tgt:,}원({s1_status}) | S2목표:{s2_tgt:,}원({s2_status})")
+
         # ⑥ 보유 종목은 unheld_record에서 제거
         for code in list(unheld_record.keys()):
             if code in held_codes:
