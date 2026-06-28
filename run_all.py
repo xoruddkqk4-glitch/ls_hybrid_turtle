@@ -14,7 +14,7 @@
 #   1. LS증권 로그인
 #   2. risk_guardian  — 기존 포지션 손절·익절 감시 (기존 자산 보호 최우선)
 #   3. target_manager — 미보유 종목 목표가 갱신
-#   4. timer_agent    — 풀백 재돌파 진입 신호 체크 (진입 신호 종목 목록 생성)
+#   4. timer_agent    — 시간 가드 안착 체크 (진입 신호 종목 목록 생성)
 #   5. turtle_order_logic — 진입·피라미딩 주문 실행
 #
 # 실행 방법:
@@ -221,9 +221,9 @@ def main():
     _step_done(t, "STEP 3: 터틀 신호 갱신")
 
     # ─────────────────────────────────────
-    # STEP 4: 풀백 재돌파 진입 신호 체크
+    # STEP 4: 시간 가드 안착 체크
     # ─────────────────────────────────────
-    t = _step_start("STEP 4: 풀백 재돌파 진입 신호 체크")
+    t = _step_start("STEP 4: 시간 가드 안착 체크")
     entry_signals = []
     try:
         entry_signals = timer_agent.run_timer_check()
@@ -231,7 +231,7 @@ def main():
         msg = f"⚠️ [run_all] 타이머 체크 오류 (계속 진행): {e}"
         print(msg)
         SendMessage(msg)
-    _step_done(t, "STEP 4: 풀백 재돌파 진입 신호 체크")
+    _step_done(t, "STEP 4: 시간 가드 안착 체크")
 
     # ─────────────────────────────────────
     # STEP 5: 진입·피라미딩 주문 실행
