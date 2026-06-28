@@ -160,10 +160,10 @@ def run_timer_check() -> list:
             code = s["code"]
             src  = s["entry_source"]
             name = watchlist.get(code, {}).get("name", code)
-            peak_key = "turtle_s2_peak_price" if src == "TURTLE_S2" else "turtle_s1_peak_price"
-            peak = unheld_record[code].get(peak_key, "?")
-            peak_str = f"{peak:,}원" if isinstance(peak, (int, float)) else str(peak)
-            print(f"[timer_agent]   → {name}({code}) [{src}] 재돌파 기준가: {peak_str}")
+            breakout_key = "turtle_s2_breakout_price" if src == "TURTLE_S2" else "turtle_s1_breakout_price"
+            breakout_price = unheld_record[code].get(breakout_key, "?")
+            breakout_str = f"{breakout_price:,}원" if isinstance(breakout_price, (int, float)) else str(breakout_price)
+            print(f"[timer_agent]   → {name}({code}) [{src}] 돌파 기준가: {breakout_str}")
         names = [watchlist.get(s["code"], {}).get("name", s["code"]) for s in entry_signals]
         print(f"[timer_agent] 진입 신호 종목: {', '.join(names)}")
     else:

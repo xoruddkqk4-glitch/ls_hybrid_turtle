@@ -258,15 +258,16 @@ class TestInitializeUnheldRecord(unittest.TestCase):
 
         # 필수 필드 존재 확인
         for field in ("turtle_s1_signal", "turtle_s2_signal",
-                      "turtle_s1_peak_price", "turtle_s1_peak_locked", "turtle_s1_entry_ready",
-                      "turtle_s2_peak_price", "turtle_s2_peak_locked", "turtle_s2_entry_ready"):
+                      "turtle_s1_breakout_at", "turtle_s1_breakout_price", "turtle_s1_limit_price",
+                      "turtle_s1_target_price", "turtle_s1_peak_price", "turtle_s1_entry_ready",
+                      "turtle_s2_breakout_at", "turtle_s2_breakout_price", "turtle_s2_limit_price",
+                      "turtle_s2_target_price", "turtle_s2_peak_price", "turtle_s2_entry_ready"):
             self.assertIn(field, rec, f"'{field}' 필드가 있어야 함")
 
         # 초기값 확인
         self.assertFalse(rec["turtle_s1_signal"],       "S1 신호 초기값 = False")
         self.assertFalse(rec["turtle_s2_signal"],       "S2 신호 초기값 = False")
-        self.assertIsNone(rec["turtle_s1_peak_price"],  "S1 최고값 초기값 = None")
-        self.assertFalse(rec["turtle_s1_peak_locked"],  "S1 잠금 초기값 = False")
+        self.assertIsNone(rec["turtle_s1_breakout_price"],  "S1 돌파선 초기값 = None")
         self.assertFalse(rec["turtle_s1_entry_ready"],  "S1 진입준비 초기값 = False")
 
     def test_기존_종목_상태_보존(self):
@@ -275,14 +276,21 @@ class TestInitializeUnheldRecord(unittest.TestCase):
 
         watchlist = {"005930": {"name": "삼성전자"}}
         existing = {"005930": {
-            "turtle_s1_signal":      True,
-            "turtle_s2_signal":      False,
-            "turtle_s1_peak_price":  52_000,
-            "turtle_s1_peak_locked": True,
-            "turtle_s1_entry_ready": False,
-            "turtle_s2_peak_price":  None,
-            "turtle_s2_peak_locked": False,
-            "turtle_s2_entry_ready": False,
+            "turtle_s1_signal":          True,
+            "turtle_s2_signal":          False,
+            "turtle_s1_breakout_at":     "2026-04-27 10:00:00",
+            "turtle_s1_breakout_price":  50000,
+            "turtle_s1_limit_price":     48000,
+            "turtle_s1_target_price":    50000,
+            "turtle_s1_peak_price":      52000,
+            "turtle_s1_entry_ready":     False,
+            "turtle_s2_signal":          False,
+            "turtle_s2_breakout_at":     None,
+            "turtle_s2_breakout_price":  None,
+            "turtle_s2_limit_price":     None,
+            "turtle_s2_target_price":    None,
+            "turtle_s2_peak_price":      None,
+            "turtle_s2_entry_ready":     False,
         }}
         saved = {}
 
@@ -294,8 +302,8 @@ class TestInitializeUnheldRecord(unittest.TestCase):
         rec = saved.get("005930", existing["005930"])
         self.assertEqual(rec["turtle_s1_peak_price"], 52_000,
                          "기존 peak_price가 보존되어야 함")
-        self.assertTrue(rec["turtle_s1_peak_locked"],
-                        "기존 peak_locked가 보존되어야 함")
+        self.assertEqual(rec["turtle_s1_breakout_at"], "2026-04-27 10:00:00",
+                         "기존 breakout_at이 보존되어야 함")
 
 
 # ══════════════════════════════════════════════════════════

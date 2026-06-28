@@ -108,18 +108,20 @@ def initialize_unheld_record(watchlist: dict):
         for code in new_codes:
             name = watchlist.get(code, {}).get("name", code)
             unheld_record[code] = {
-                "turtle_s1_signal":      False,
-                "turtle_s2_signal":      False,
-                "turtle_s1_peak_price":  None,   # S1 돌파 후 장중 최고값
-                "turtle_s1_peak_locked": False,  # S1 최고값 잠금 여부 (눌림 시작)
-                "turtle_s1_entry_ready": False,  # S1 풀백 재돌파 진입 조건 충족
-                "turtle_s1_first_breakout_at": None,  # S1 최초 돌파(신고가 상회) 시각
-                "turtle_s1_locked_at":   None,   # S1 최고값 잠금(눌림 시작) 시각
-                "turtle_s2_peak_price":  None,   # S2 동일
-                "turtle_s2_peak_locked": False,
-                "turtle_s2_entry_ready": False,
-                "turtle_s2_locked_at":   None,
-                "turtle_s2_first_breakout_at": None,
+                "turtle_s1_signal":          False,
+                "turtle_s1_breakout_at":     None,  # 최초 돌파 시각
+                "turtle_s1_breakout_price":  None,  # 최초 돌파 시점의 돌파선 가격
+                "turtle_s1_limit_price":     None,  # 마지노선 지지선 가격 (breakout_price - 0.5 * ATR)
+                "turtle_s1_target_price":    None,  # 1차 진입 목표가
+                "turtle_s1_peak_price":      None,  # 감시 중 기록한 최고가
+                "turtle_s1_entry_ready":     False, # 시간가드 만료 후 최종 진입 조건 충족 여부
+                "turtle_s2_signal":          False,
+                "turtle_s2_breakout_at":     None,
+                "turtle_s2_breakout_price":  None,
+                "turtle_s2_limit_price":     None,
+                "turtle_s2_target_price":    None,
+                "turtle_s2_peak_price":      None,
+                "turtle_s2_entry_ready":     False,
             }
             print(f"[target_manager] {name}({code}) 초기화")
 
@@ -136,6 +138,103 @@ def initialize_unheld_record(watchlist: dict):
 # ─────────────────────────────────────────
 # 메인 실행 함수
 # ─────────────────────────────────────────
+
+
+def _update_guard_status(pos: dict, prefix: str, current_price: int, atr: float, guard_seconds: int, now_str: str, name: str):
+    """지정된 접두사(turtle_s1 or turtle_s2)의 시간 가드 상태를 갱신한다."""
+    signal         = pos.get(f"{prefix}_signal", False)
+    breakout_at    = pos.get(f"{prefix}_breakout_at")
+    breakout_price = pos.get(f"{prefix}_breakout_price")
+    limit_price    = pos.get(f"{prefix}_limit_price")
+    target_price   = pos.get(f"{prefix}_target_price") or 0.0
+    peak_price     = pos.get(f"{prefix}_peak_price")
+    entry_ready    = pos.get(f"{prefix}_entry_ready", False)
+
+    # 1. 미돌파 상태 (대기 중)
+    if not signal:
+        if current_price > target_price:
+            # 최초 돌파 발생
+            signal = True
+            breakout_at = now_str
+            breakout_price = target_price
+            limit_price = int(breakout_price - 0.5 * atr)
+            peak_price = current_price
+            entry_ready = False
+            print(f"[target_manager] {name} {prefix.upper()} 최초 돌파! "
+                  f"현재가: {current_price:,}원 > 목표가: {target_price:,}원 "
+                  f"(마지노선: {limit_price:,}원, 가드 시작)")
+        else:
+            # 돌파선 미달
+            entry_ready = False
+    
+    # 2. 돌파 상태 (타이머 작동 중)
+    else:
+        # 최고가 갱신
+        if peak_price is None or current_price > peak_price:
+            peak_price = current_price
+
+        # A. 마지노선 붕괴 체크
+        if limit_price is not None and current_price < limit_price:
+            # 붕괴 리셋 발생
+            new_target = int(peak_price + 0.2 * atr)
+            print(f"[target_manager] {name} {prefix.upper()} 마지노선 붕괴! "
+                  f"현재가: {current_price:,}원 < 마지노선: {limit_price:,}원 "
+                  f"(타이머 리셋, 새로운 목표가: {new_target:,}원)")
+            signal = False
+            breakout_at = None
+            breakout_price = None
+            limit_price = None
+            peak_price = None
+            entry_ready = False
+            target_price = new_target
+            
+        # B. 시간 가드 체크
+        else:
+            try:
+                # 경과 시간 계산
+                fmt = "%Y-%m-%d %H:%M:%S"
+                dt_breakout = datetime.strptime(breakout_at, fmt)
+                dt_now = datetime.strptime(now_str, fmt)
+                elapsed = (dt_now - dt_breakout).total_seconds()
+            except Exception:
+                elapsed = 0.0
+
+            if elapsed >= guard_seconds:
+                # C. 시간 만료 시 최종 판정
+                if current_price >= breakout_price:
+                    # 최종 안착 성공
+                    entry_ready = True
+                    print(f"[target_manager] {name} {prefix.upper()} 시간 안착 성공! "
+                          f"현재가: {current_price:,}원 >= 돌파선: {breakout_price:,}원 "
+                          f"(경과: {elapsed/60:.1f}분 / 가드: {guard_seconds/60:.1f}분)")
+                else:
+                    # 최종 복구 실패 리셋
+                    new_target = int(peak_price + 0.2 * atr)
+                    print(f"[target_manager] {name} {prefix.upper()} 시간 만료 후 회복 실패! "
+                          f"현재가: {current_price:,}원 < 돌파선: {breakout_price:,}원 "
+                          f"(타이머 리셋, 새로운 목표가: {new_target:,}원)")
+                    signal = False
+                    breakout_at = None
+                    breakout_price = None
+                    limit_price = None
+                    peak_price = None
+                    entry_ready = False
+                    target_price = new_target
+            else:
+                # 대기 중
+                entry_ready = False
+                print(f"[target_manager] {name} {prefix.upper()} 시간 가드 대기 중... "
+                      f"(경과: {elapsed/60:.1f}분 / 가드: {guard_seconds/60:.1f}분, "
+                      f"현재가: {current_price:,}원, 돌파선: {breakout_price:,}원)")
+
+    # 갱신된 값을 다시 딕셔너리에 덮어쓰기
+    pos[f"{prefix}_signal"]         = signal
+    pos[f"{prefix}_breakout_at"]     = breakout_at
+    pos[f"{prefix}_breakout_price"]  = breakout_price
+    pos[f"{prefix}_limit_price"]     = limit_price
+    pos[f"{prefix}_target_price"]    = target_price
+    pos[f"{prefix}_peak_price"]      = peak_price
+    pos[f"{prefix}_entry_ready"]     = entry_ready
 
 
 def run_update(held_codes: Optional[Set[str]] = None):
@@ -203,139 +302,63 @@ def run_update(held_codes: Optional[Set[str]] = None):
             # 터틀 신호 계산 (직전 N일 장중 고가 vs 현재가)
             s1_high   = indicator_calc.calc_n_day_high(daily_60, n=20)
             s2_high   = indicator_calc.calc_n_day_high(daily_60, n=55)
-            turtle_s1 = s1_high > 0 and current_price > s1_high
-            turtle_s2 = s2_high > 0 and current_price > s2_high
+            
+            # ATR 계산
+            atr_val   = indicator_calc.calc_atr(daily_60, period=20)
+            if atr_val <= 0:
+                print(f"[target_manager] {code} ATR 계산 불가 (0) → 스킵")
+                continue
 
             # 최초 돌파 시각 기록용 현재 시각 문자열 (이번 주기 공통 사용)
             now_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+            name = watchlist.get(code, {}).get("name", code)
 
             if code not in unheld_record:
                 # 처음 등록 — 신호 상태로 peak 초기값 결정
                 unheld_record[code] = {
-                    "turtle_s1_signal":      turtle_s1,
-                    "turtle_s2_signal":      turtle_s2,
-                    # 처음 등록 시점에 신호가 True이면 현재가를 최고값 시작점으로 기록
-                    "turtle_s1_peak_price":  current_price if turtle_s1 else None,
-                    "turtle_s1_peak_locked": False,
-                    "turtle_s1_entry_ready": False,
-                    "turtle_s1_locked_at":   None,
-                    # 처음 등록 시점에 신호가 True이면 돌파 시각도 함께 기록
-                    "turtle_s1_first_breakout_at": now_str if turtle_s1 else None,
-                    "turtle_s2_peak_price":  current_price if turtle_s2 else None,
-                    "turtle_s2_peak_locked": False,
-                    "turtle_s2_entry_ready": False,
-                    "turtle_s2_locked_at":   None,
-                    "turtle_s2_first_breakout_at": now_str if turtle_s2 else None,
+                    "turtle_s1_signal":          False,
+                    "turtle_s1_breakout_at":     None,
+                    "turtle_s1_breakout_price":  None,
+                    "turtle_s1_limit_price":     None,
+                    "turtle_s1_target_price":    s1_high,
+                    "turtle_s1_peak_price":      None,
+                    "turtle_s1_entry_ready":     False,
+                    "turtle_s2_signal":          False,
+                    "turtle_s2_breakout_at":     None,
+                    "turtle_s2_breakout_price":  None,
+                    "turtle_s2_limit_price":     None,
+                    "turtle_s2_target_price":    s2_high,
+                    "turtle_s2_peak_price":      None,
+                    "turtle_s2_entry_ready":     False,
                 }
-            else:
-                # 구버전 호환: 새 필드가 없는 JSON 대비 기본값으로 초기화
-                unheld_record[code].setdefault("turtle_s1_peak_price",  None)
-                unheld_record[code].setdefault("turtle_s1_peak_locked", False)
-                unheld_record[code].setdefault("turtle_s1_entry_ready", False)
-                unheld_record[code].setdefault("turtle_s1_locked_at",   None)
-                unheld_record[code].setdefault("turtle_s1_first_breakout_at", None)
-                unheld_record[code].setdefault("turtle_s2_peak_price",  None)
-                unheld_record[code].setdefault("turtle_s2_peak_locked", False)
-                unheld_record[code].setdefault("turtle_s2_entry_ready", False)
-                unheld_record[code].setdefault("turtle_s2_locked_at",   None)
-                unheld_record[code].setdefault("turtle_s2_first_breakout_at", None)
+            
+            pos = unheld_record[code]
+            # 구버전 호환: 새 필드가 없는 JSON 대비 기본값으로 초기화
+            pos.setdefault("turtle_s1_signal",          False)
+            pos.setdefault("turtle_s1_breakout_at",     None)
+            pos.setdefault("turtle_s1_breakout_price",  None)
+            pos.setdefault("turtle_s1_limit_price",     None)
+            pos.setdefault("turtle_s1_target_price",    s1_high)
+            pos.setdefault("turtle_s1_peak_price",      None)
+            pos.setdefault("turtle_s1_entry_ready",     False)
+            
+            pos.setdefault("turtle_s2_signal",          False)
+            pos.setdefault("turtle_s2_breakout_at",     None)
+            pos.setdefault("turtle_s2_breakout_price",  None)
+            pos.setdefault("turtle_s2_limit_price",     None)
+            pos.setdefault("turtle_s2_target_price",    s2_high)
+            pos.setdefault("turtle_s2_peak_price",      None)
+            pos.setdefault("turtle_s2_entry_ready",     False)
 
-                # S1 신호 업데이트 + 풀백 상태 관리
-                # 직전에 신호가 꺼져 있었는데 이번에 켜졌으면(=최초 돌파) 돌파 시각 기록
-                prev_s1_signal = unheld_record[code]["turtle_s1_signal"]
-                if turtle_s1 and not prev_s1_signal:
-                    unheld_record[code]["turtle_s1_first_breakout_at"] = now_str
-                unheld_record[code]["turtle_s1_signal"] = turtle_s1
-                if turtle_s1:
-                    s1_peak   = unheld_record[code]["turtle_s1_peak_price"]
-                    s1_locked = unheld_record[code]["turtle_s1_peak_locked"]
-                    if not s1_locked:
-                        # WATCHING 상태: 최고값 갱신 중
-                        if s1_peak is None or current_price >= s1_peak:
-                            # 첫 진입이거나 계속 오르는 중 → 최고값 갱신
-                            unheld_record[code]["turtle_s1_peak_price"]  = current_price
-                            unheld_record[code]["turtle_s1_entry_ready"] = False
-                        else:
-                            # 최고값보다 내려옴 → PULLBACK 시작, 최고값 잠금
-                            unheld_record[code]["turtle_s1_peak_locked"] = True
-                            unheld_record[code]["turtle_s1_entry_ready"] = False
-                            unheld_record[code]["turtle_s1_locked_at"]   = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
-                    else:
-                        # PULLBACK 상태: 잠긴 최고값 재돌파 여부 확인
-                        if current_price > s1_peak:
-                            unheld_record[code]["turtle_s1_entry_ready"] = True   # 재돌파!
-                        else:
-                            unheld_record[code]["turtle_s1_entry_ready"] = False  # 아직 대기
-                else:
-                    # 신호 소멸 (돌파값 아래로 하락) → 전체 초기화
-                    unheld_record[code]["turtle_s1_peak_price"]  = None
-                    unheld_record[code]["turtle_s1_peak_locked"] = False
-                    unheld_record[code]["turtle_s1_entry_ready"] = False
-                    unheld_record[code]["turtle_s1_locked_at"]   = None
-                    unheld_record[code]["turtle_s1_first_breakout_at"] = None
+            # 일봉 갱신 등으로 신고가가 타겟가보다 더 상향되었을 때의 동기화
+            if pos["turtle_s1_target_price"] is None or s1_high > pos["turtle_s1_target_price"]:
+                pos["turtle_s1_target_price"] = s1_high
+            if pos["turtle_s2_target_price"] is None or s2_high > pos["turtle_s2_target_price"]:
+                pos["turtle_s2_target_price"] = s2_high
 
-                # S2 신호 업데이트 + 풀백 상태 관리 (S1과 동일 구조)
-                # 직전에 신호가 꺼져 있었는데 이번에 켜졌으면(=최초 돌파) 돌파 시각 기록
-                prev_s2_signal = unheld_record[code]["turtle_s2_signal"]
-                if turtle_s2 and not prev_s2_signal:
-                    unheld_record[code]["turtle_s2_first_breakout_at"] = now_str
-                unheld_record[code]["turtle_s2_signal"] = turtle_s2
-                if turtle_s2:
-                    s2_peak   = unheld_record[code]["turtle_s2_peak_price"]
-                    s2_locked = unheld_record[code]["turtle_s2_peak_locked"]
-                    if not s2_locked:
-                        if s2_peak is None or current_price >= s2_peak:
-                            unheld_record[code]["turtle_s2_peak_price"]  = current_price
-                            unheld_record[code]["turtle_s2_entry_ready"] = False
-                        else:
-                            unheld_record[code]["turtle_s2_peak_locked"] = True
-                            unheld_record[code]["turtle_s2_entry_ready"] = False
-                            unheld_record[code]["turtle_s2_locked_at"]   = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
-                    else:
-                        if current_price > s2_peak:
-                            unheld_record[code]["turtle_s2_entry_ready"] = True
-                        else:
-                            unheld_record[code]["turtle_s2_entry_ready"] = False
-                else:
-                    unheld_record[code]["turtle_s2_peak_price"]  = None
-                    unheld_record[code]["turtle_s2_peak_locked"] = False
-                    unheld_record[code]["turtle_s2_entry_ready"] = False
-                    unheld_record[code]["turtle_s2_locked_at"]   = None
-                    unheld_record[code]["turtle_s2_first_breakout_at"] = None
-
-            # 로그 출력 (터틀 신호 및 풀백 상태 한눈에 보기)
-            name = watchlist.get(code, {}).get("name", code)
-            s1_price_str = f"{s1_high:,}원" if s1_high > 0 else "N/A"
-            s2_price_str = f"{s2_high:,}원" if s2_high > 0 else "N/A"
-            s1_str = f"[OK] S1({s1_price_str})" if turtle_s1 else f"S1미달({s1_price_str})"
-            s2_str = f"[OK] S2({s2_price_str})" if turtle_s2 else f"S2미달({s2_price_str})"
-            # 풀백 상태 표시 (S2 우선)
-            def _peak_state(signal, peak_price, peak_locked, entry_ready):
-                if not signal:
-                    return ""
-                if entry_ready:
-                    return f"([OK]재돌파 peak:{peak_price:,}원)"
-                if peak_locked:
-                    return f"(눌림중 peak:{peak_price:,}원)"
-                return f"(상승중 peak:{peak_price:,}원)" if peak_price else "(진입대기)"
-            if turtle_s2:
-                state_str = " / S2상태:" + _peak_state(
-                    turtle_s2,
-                    unheld_record[code].get("turtle_s2_peak_price"),
-                    unheld_record[code].get("turtle_s2_peak_locked", False),
-                    unheld_record[code].get("turtle_s2_entry_ready", False),
-                )
-            elif turtle_s1:
-                state_str = " / S1상태:" + _peak_state(
-                    turtle_s1,
-                    unheld_record[code].get("turtle_s1_peak_price"),
-                    unheld_record[code].get("turtle_s1_peak_locked", False),
-                    unheld_record[code].get("turtle_s1_entry_ready", False),
-                )
-            else:
-                state_str = ""
-            print(f"[target_manager] {name}({code}) "
-                  f"현재가:{current_price:,}원 / {s1_str} / {s2_str}{state_str}")
+            # 상태 업데이트 (주식 가드: 20분 = 1200초)
+            _update_guard_status(pos, "turtle_s1", current_price, atr_val, 1200, now_str, name)
+            _update_guard_status(pos, "turtle_s2", current_price, atr_val, 1200, now_str, name)
 
         # ⑥ 보유 종목은 unheld_record에서 제거
         for code in list(unheld_record.keys()):
