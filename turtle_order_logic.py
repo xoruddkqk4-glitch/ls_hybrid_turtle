@@ -623,9 +623,9 @@ def run_orders(entry_signals: list):
 
         # 최초 돌파 시각 조회 (진입 경로에 따라 S1/S2 필드 구분)
         # → 돌파→매수 소요시간을 진입 메시지에 넣기 위함
-        breakout_key = ("turtle_s2_first_breakout_at"
+        breakout_key = ("turtle_s2_breakout_at"
                         if entry_source == "TURTLE_S2"
-                        else "turtle_s1_first_breakout_at")
+                        else "turtle_s1_breakout_at")
         first_breakout_at = unheld_record.get(code, {}).get(breakout_key, "") or ""
 
         # 진입 주문 실행 (진입 경로 + 돌파 시각 전달)

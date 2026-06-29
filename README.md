@@ -272,7 +272,7 @@ ls_hybrid_turtle/
 | `dynamic_watchlist.json` | 오늘 감시 대상 50개 종목 |
 | `stock_candidates.json` | 08:40 배치 후보 종목 목록 |
 | `held_stock_record.json` | 현재 보유 중인 종목 상태 (effective_risk_factor 포함) |
-| `unheld_stock_record.json` | 미보유 종목의 신고가 신호·최초 돌파 시각(`first_breakout_at`)·풀백 상태 |
+| `unheld_stock_record.json` | 미보유 종목의 신고가 신호·최초 돌파 시각(`breakout_at`)·풀백 상태 |
 | `trade_ledger.json` | 전체 체결 원장 기록 |
 | `sector_cache.json` | 종목별 테마 캐시 |
 | `daily_chart_cache.json` | 일봉 캐시 |

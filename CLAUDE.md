@@ -64,7 +64,7 @@
 | `trade_ledger.py` | 체결 원장 기록 + Google Sheets 동기화 — 매도 체결 시 '포트폴리오 추이'·'손익차트' 시트 자동 갱신 |
 | `telegram_alert.py` | 텔레그램 알림 단일 모듈 |
 | `config.py` | `get_watchlist()` — `dynamic_watchlist.json`을 읽어 감시 종목 반환 |
-| `target_manager.py` | 미보유 종목 터틀 신호(`turtle_s1/s2_signal`) 및 풀백 상태(`peak_price·peak_locked·entry_ready`) 갱신. 신호가 처음 켜질 때 `turtle_s1/s2_first_breakout_at`(최초 돌파 시각) 기록 |
+| `target_manager.py` | 미보유 종목 터틀 신호(`turtle_s1/s2_signal`) 및 풀백 상태(`peak_price·peak_locked·entry_ready`) 갱신. 신호가 처음 켜질 때 `turtle_s1/s2_breakout_at`(최초 돌파 시각) 기록 |
 | `timer_agent.py` | 풀백 재돌파 진입 신호 체크 (`entry_ready` + 10시 필터) |
 | `turtle_order_logic.py` | 리스크 기반 Unit 수량 계산, 피라미딩 주문, 예외 진입 처리. 진입 시 분할 익절 플래그 초기화 및 구버전 호환 처리 |
 | `risk_guardian.py` | 2N 하드 손절, 5%/10% 분할 익절 및 갭상승 예외 처리, 트레일링 스탑 실시간 감시 |
@@ -89,7 +89,7 @@
 | `stock_candidates.json` | 08:40 배치 후보 종목 (스코어·지표 포함) |
 | `dynamic_watchlist.json` | 09:05 배치 최종 감시 종목 50개 — 모든 모듈이 이 파일을 참조 |
 | `watchlist_config.json` | 수동 화이트리스트/블랙리스트 (없으면 자동 선정만 사용) |
-| `unheld_stock_record.json` | 미보유 종목의 터틀 신호(`turtle_s1/s2_signal`)·최초 돌파 시각(`turtle_s1/s2_first_breakout_at`)·풀백 상태(`peak_price·peak_locked·entry_ready`) |
+| `unheld_stock_record.json` | 미보유 종목의 터틀 신호(`turtle_s1/s2_signal`)·최초 돌파 시각(`turtle_s1/s2_breakout_at`)·풀백 상태(`peak_price·peak_locked·entry_ready`) |
 | `held_stock_record.json` | 보유 종목의 Unit 수·마지막 매수가·손절가·피라미딩 트리거가·종목별 유효 리스크팩터(`effective_risk_factor`)·매수 후 최고가(`high_since_entry`)·분할 익절 플래그 |
 | `trade_ledger.json` | 체결 원장 전체 기록 |
 | `sector_cache.json` | 종목별 테마 캐시 (t1532 API 결과) |
@@ -264,7 +264,7 @@ journalctl -u ls_telegram_listener -f        # 실시간 로그
 > - `turtle_order_logic.py` & `balance_sync.py`: 포지션 진입 및 수동 동기화 편입 시 `tp_5_executed`, `tp_10_executed` 익절 플래그 초기화.
 > - `trade_ledger.py`: 부분 익절 구분을 위한 `"EXIT_PARTIAL_5"`, `"EXIT_PARTIAL_10"` 매매 구분코드 추가.
 > - `/block` 보유 종목: 추가 매수(피라미딩) + 손절·익절 감시 모두 중단 (수동 매도 전용). `/unblock` 시 매도 감시 자동 재개
-> - `target_manager.py`: `turtle_s1/s2_first_breakout_at`(최초 신고가 돌파 시각) 필드 추가 — 신호 소멸 시 초기화
+> - `target_manager.py`: `turtle_s1/s2_breakout_at`(최초 신고가 돌파 시각) 필드 추가 — 신호 소멸 시 초기화
 > - `turtle_order_logic.py`: 진입 텔레그램 메시지에 "돌파→매수 소요시간" 추가
 > - `telegram_commands.py`: `/held`에서 손절가 옆 "도달 시 손익" 표시, 피라미딩 대기 사유(블랙리스트/유닛 한도/테마 한도/매수금 상한) 표시
 
