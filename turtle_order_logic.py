@@ -386,8 +386,8 @@ def place_entry_order(
 
     # ⑤ 텔레그램 알림
     source_label = {
-        "TURTLE_S2": "터틀S2(55일신고가)",
-        "TURTLE_S1": "터틀S1(20일신고가)",
+        "TURTLE_S2": "터틀S2(55일신고가) 시간 가드 안착",
+        "TURTLE_S1": "터틀S1(20일신고가) 시간 가드 안착",
     }.get(entry_source, entry_source)
     # 최초 돌파부터 실제 매수까지 걸린 시간 (돌파 → 널림 → 재돌파 → 매수 과정의 총 소요)
     elapsed_str = _format_elapsed(first_breakout_at)
